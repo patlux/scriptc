@@ -295,6 +295,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "fs.chmodSync": { argTypes: [STRING, F64], result: VOID },
   "fs.chownSync": { argTypes: [STRING, F64, F64], result: VOID },
   "fs.copyFileSync": { argTypes: [STRING, STRING], result: VOID },
+  "fs.renameSync": { argTypes: [STRING, STRING], result: VOID },
   "fs.writeFileModeSync": { argTypes: [STRING, STRING, F64], result: VOID },
   "fs.mkdirModeSync": { argTypes: [STRING, F64], result: VOID },
   "fs.mkdirRecursiveModeSync": { argTypes: [STRING, F64], result: VOID },

@@ -91,13 +91,14 @@ describe(`island web globals (scriptc-only${sanitize ? ", sanitized" : ""})`, ()
     // CLI's graph started loading undici (its fileapi classes extend
     // Event and buffer.Blob at LOAD); structuredClone joined with the
     // globals lane (the HTML StructuredSerialize subset, cycles
-    // included); WritableStream/FormData/WebSocket stay fenced by
-    // absence.
+    // included). FormData is available for SDK body discrimination and
+    // in-memory form construction; multipart fetch bodies remain fenced.
+    // WritableStream/WebSocket stay fenced by absence.
     expect(out).toBe(
       "function function function function function function " +
         "function function function object object " +
         "function function function function function " +
-        "undefined function undefined undefined",
+        "undefined function function undefined",
     );
   });
 

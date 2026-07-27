@@ -111,7 +111,10 @@ static ScrStr *scr_arch_str = NULL;      /* interned process.arch */
 static ScrStr *scr_versions_node_str = NULL; /* interned process.versions.node */
 static ScrStr *scr_versions_openssl_str = NULL; /* interned process.versions.openssl */
 
+void scr_process_stdin_restore_mode(void);
+
 static void scr_lib_cleanup(void) {
+  scr_process_stdin_restore_mode();
   scr_arr_release(scr_argv_arr);
   scr_argv_arr = NULL;
   scr_str_release(scr_platform_str);
@@ -1055,6 +1058,7 @@ void scr_process_exit(double code) {
   /* _Exit skips atexit handlers on purpose: no further code runs (matching
    * Node), and the RC audit is meaningless mid-program (live values are
    * expected). scr_init's flush-at-exit is also skipped — flush here. */
+  scr_process_stdin_restore_mode();
   fflush(stdout);
   _Exit((int)code);
 }
@@ -1566,6 +1570,45 @@ void scr_fs_write_file_mode(ScrStr *path, ScrStr *data, double mode) {
 
 void scr_fs_append_file(ScrStr *path, ScrStr *data) {
   scr_fs_write_common(path, data, "ab");
+}
+
+void scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length) {
+  size_t bytelen = buf->len;
+  char msg[160];
+  char numbuf[40];
+  if (offset < 0 || offset > (double)bytelen) {
+    numbuf[scr_f64_to_str(offset, numbuf)] = 0;
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"offset\" is out of range. It must be >= 0 && <= 9007199254740991. Received %s",
+                       numbuf);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  size_t off = (size_t)offset;
+  if (length < 0 || (double)length > (double)(bytelen - off)) {
+    numbuf[scr_f64_to_str(length, numbuf)] = 0;
+    int len = snprintf(msg, sizeof msg,
+                       "The value of \"length\" is out of range. It must be <= %zu. Received %s",
+                       bytelen - off, numbuf);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return;
+  }
+  size_t at = 0;
+  size_t want = (size_t)length;
+  while (at < want) {
+    ssize_t wrote = write((int)fd, buf->data + off + at, want - at);
+    if (wrote < 0) {
+      if (errno == EINTR) continue;
+      int e = errno;
+      char namebuf[16];
+      const char *name = scr_errno_name(e, namebuf, sizeof namebuf);
+      const char *text = scr_errno_text(e);
+      int len = snprintf(msg, sizeof msg, "%s: %s, write", name, text);
+      scr_throw_error_msg_code(SCR_ERR_ERROR, msg, (size_t)len, name);
+      return;
+    }
+    at += (size_t)wrote;
+  }
 }
 
 bool scr_fs_exists(ScrStr *path) {
@@ -2250,6 +2293,17 @@ void scr_process_stdin_set_raw_mode(bool raw) {
   }
 }
 #endif /* _WIN32 */
+
+void scr_process_stdin_restore_mode(void) {
+  if (!scr_stdin_cooked_saved) return;
+#ifdef _WIN32
+  HANDLE h = (HANDLE)_get_osfhandle(0);
+  if (h != INVALID_HANDLE_VALUE) (void)SetConsoleMode(h, scr_stdin_cooked);
+#else
+  (void)tcsetattr(0, TCSADRAIN, &scr_stdin_cooked);
+#endif
+  scr_stdin_cooked_saved = false;
+}
 
 /* Node's destroy() tears down the stream: the events unit (scr_events.c)
  * drops every stdin listener, stops watching fd 0, and ends a running

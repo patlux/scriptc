@@ -892,6 +892,7 @@ declare module "node:fs" {
   export function mkdirSync(path: string): void;
   export function mkdirSync(path: string, options: { recursive?: boolean; mode?: number }): void;
   export function unlinkSync(path: string): void;
+  export function renameSync(oldPath: string, newPath: string): void;
   export function chmodSync(path: string, mode: number): void;
   export function chownSync(path: string, uid: number, gid: number): void;
   /* The 2-argument form only (Node's mode flags have no lowering). The

@@ -36,6 +36,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <poll.h>
+#endif
 
 #include "quickjs.h"
 
@@ -2725,6 +2728,72 @@ static JSValue isl_host_read_stdin(JSContext *ctx, JSValueConst this_val,
   return ab;
 }
 
+static JSValue isl_host_read_stdin_chunk(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  (void)argv;
+  JSValue result = JS_NewObject(ctx);
+  int status = 0; /* 0 = would-block, 1 = data, 2 = EOF/HUP */
+#ifndef _WIN32
+  struct pollfd pfd = {0, POLLIN, 0};
+  int rc;
+  do {
+    rc = poll(&pfd, 1, 0);
+  } while (rc < 0 && errno == EINTR);
+  if (rc < 0) {
+    JS_FreeValue(ctx, result);
+    return JS_ThrowTypeError(ctx, "polling stdin failed: %s", strerror(errno));
+  }
+  if (rc == 0) {
+    JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, status));
+    return result;
+  }
+  if (pfd.revents & (POLLNVAL | POLLERR)) {
+    JS_FreeValue(ctx, result);
+    return JS_ThrowTypeError(ctx, "polling stdin failed: invalid or errored descriptor");
+  }
+  if (!(pfd.revents & (POLLIN | POLLHUP))) {
+    JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, status));
+    return result;
+  }
+#endif
+  uint8_t buf[65536];
+  ssize_t n;
+  do {
+    n = read(0, buf, sizeof buf);
+  } while (n < 0 && errno == EINTR);
+  if (n < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, status));
+      return result;
+    }
+    JS_FreeValue(ctx, result);
+    return JS_ThrowTypeError(ctx, "reading stdin chunk failed: %s", strerror(errno));
+  }
+  if (n == 0) {
+    status = 2;
+    JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, status));
+    return result;
+  }
+  status = 1;
+  JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, status));
+  JS_SetPropertyStr(ctx, result, "data", JS_NewArrayBufferCopy(ctx, buf, (size_t)n));
+  return result;
+}
+
+static JSValue isl_host_set_stdin_raw_mode(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+  (void)this_val;
+  bool raw = argc > 0 && JS_ToBool(ctx, argv[0]);
+  if (raw) {
+    scr_process_stdin_set_raw_mode(true);
+  } else {
+    scr_process_stdin_restore_mode();
+  }
+  return JS_UNDEFINED;
+}
+
 static JSValue isl_host_exit(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   (void)this_val;
@@ -2735,6 +2804,7 @@ static JSValue isl_host_exit(JSContext *ctx, JSValueConst this_val, int argc,
    * teardown here either (tearing the engine down from inside JS_Call
    * would free live frames). The RC/engine audits are documented to not
    * run on this path. */
+  scr_process_stdin_restore_mode();
   fflush(NULL);
   _exit(code);
 }
@@ -2887,6 +2957,46 @@ static JSValue isl_host_fs(JSContext *ctx, JSValueConst this_val, int argc,
     } else {
       ret = JS_EXCEPTION;
     }
+  } else if (strcmp(op, "open") == 0) {
+    ScrStr *flags = isl_arg_str(ctx, argv[2]);
+    if (flags) {
+      ret = JS_NewFloat64(ctx, scr_fs_open(a, flags));
+      scr_str_release(flags);
+    } else {
+      ret = JS_EXCEPTION;
+    }
+  } else if (strcmp(op, "read") == 0 || strcmp(op, "write") == 0) {
+    double fd = 0;
+    double offset = 0;
+    double length = 0;
+    size_t len = 0;
+    if (JS_ToFloat64(ctx, &fd, argv[1]) || JS_ToFloat64(ctx, &offset, argv[3]) ||
+        JS_ToFloat64(ctx, &length, argv[4])) {
+      ret = JS_EXCEPTION;
+    } else {
+      uint8_t *buf = JS_GetUint8Array(ctx, &len, argv[2]);
+      if (buf || len == 0) {
+        ScrBytes *bytes = scr_bytes_new(SCR_BYTES_U8, (double)len);
+        if (!bytes) {
+          ret = JS_EXCEPTION;
+        } else {
+          if (buf && len > 0) memcpy(bytes->data, buf, len);
+          if (strcmp(op, "read") == 0) {
+            ret = JS_NewFloat64(ctx, scr_fs_read_sync(fd, bytes, offset, length));
+            if (!scr_exc_pending() && buf && len > 0) memcpy(buf, bytes->data, len);
+          } else {
+            scr_fs_write_sync(fd, bytes, offset, length);
+          }
+          scr_bytes_release(bytes);
+        }
+      } else {
+        ret = JS_EXCEPTION;
+      }
+    }
+  } else if (strcmp(op, "close") == 0) {
+    double fd = 0;
+    if (JS_ToFloat64(ctx, &fd, argv[1])) ret = JS_EXCEPTION;
+    else scr_fs_close(fd);
   } else if (strcmp(op, "exists") == 0) {
     ret = JS_NewBool(ctx, scr_fs_exists(a));
   } else if (strcmp(op, "realpath") == 0) {
@@ -3287,6 +3397,31 @@ static JSValue isl_host_pid(JSContext *ctx, JSValueConst this_val, int argc,
 
 /* process.version(s) — the SAME compat-target answers the static world's
  * process.versions gives (scr_lib.c), as [node, openssl]. */
+static JSValue isl_host_kill(JSContext *ctx, JSValueConst this_val, int argc,
+                             JSValueConst *argv) {
+  (void)this_val;
+  double pid = 0;
+  double signal = 0;
+  if (argc < 1 || JS_ToFloat64(ctx, &pid, argv[0])) return JS_EXCEPTION;
+  if (argc > 1 && JS_ToFloat64(ctx, &signal, argv[1])) return JS_EXCEPTION;
+  if (!scr_process_kill(pid, signal)) return isl_throw_pending(ctx);
+  return JS_TRUE;
+}
+
+static JSValue isl_host_rename(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv) {
+  (void)this_val;
+  if (argc < 2) return JS_ThrowTypeError(ctx, "rename requires two paths");
+  ScrStr *oldpath = isl_arg_str(ctx, argv[0]);
+  ScrStr *newpath = isl_arg_str(ctx, argv[1]);
+  if (!oldpath || !newpath) return JS_EXCEPTION;
+  scr_fs_rename(oldpath, newpath);
+  scr_str_release(oldpath);
+  scr_str_release(newpath);
+  if (scr_exc_pending()) return isl_throw_pending(ctx);
+  return JS_UNDEFINED;
+}
+
 static JSValue isl_host_versions(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
   (void)this_val;
@@ -4004,10 +4139,14 @@ static const char isl_modules_bootstrap[] =
     "    return enc === null ? buf : buf.toString(enc);\n"
     "  };\n"
     "  const writeFileSync = (p, data, options) => {\n"
-    "    call(\"writeFile\", pathOf(p), dataToU8(data, options));\n"
+    "    const u8 = dataToU8(data, options);\n"
+    "    if (typeof p === \"number\") return call(\"write\", p, u8, 0, u8.length);\n"
+    "    call(\"writeFile\", pathOf(p), u8);\n"
     "  };\n"
     "  const appendFileSync = (p, data, options) => {\n"
-    "    call(\"appendFile\", pathOf(p), dataToU8(data, options));\n"
+    "    const u8 = dataToU8(data, options);\n"
+    "    if (typeof p === \"number\") return call(\"write\", p, u8, 0, u8.length);\n"
+    "    call(\"appendFile\", pathOf(p), u8);\n"
     "  };\n"
     "  const existsSync = (p) => {\n"
     "    try {\n"
@@ -4060,7 +4199,7 @@ static const char isl_modules_bootstrap[] =
     "  const chmodSync = (p, mode) => call(\"chmod\", pathOf(p), mode);\n"
     "  const readlinkSync = (p) => call(\"readlink\", pathOf(p));\n"
     "  const copyFileSync = (src, dest) => call(\"copyFile\", pathOf(src), pathOf(dest));\n"
-    "  const renameSync = (src, dest) => call(\"rename\", pathOf(src), pathOf(dest));\n"
+    "  const renameSync = (src, dest) => env.rename(pathOf(src), pathOf(dest));\n"
     "  const sync = {\n"
     "    readFileSync, writeFileSync, appendFileSync, existsSync, realpathSync,\n"
     "    mkdirSync, rmSync, rmdirSync, unlinkSync, readdirSync, statSync,\n"
@@ -4162,12 +4301,11 @@ static const char isl_modules_bootstrap[] =
     "    watchFile: () => {\n"
     "      throw new Error(\"fs.watchFile is not available in the scriptc island\");\n"
     "    },\n"
-    "    openSync: () => {\n"
-    "      throw new Error(\"fs.openSync is not available in the scriptc island (whole-file reads/writes only)\");\n"
-    "    },\n"
-    "    closeSync: () => undefined,\n"
-    "    readSync: () => {\n"
-    "      throw new Error(\"fs.readSync is not available in the scriptc island (whole-file reads/writes only)\");\n"
+    "    openSync: (p, flags) => call(\"open\", pathOf(p), String(flags)),\n"
+    "    closeSync: (fd) => call(\"close\", Number(fd)),\n"
+    "    readSync: (fd, buffer, offset, length, position) => {\n"
+    "      if (position !== undefined && position !== null) throw new Error(\"fs.readSync positions are not available in the scriptc island\");\n"
+    "      return call(\"read\", Number(fd), dataToU8(buffer), Number(offset), Number(length));\n"
     "    },\n"
     "    read: () => {\n"
     "      throw new Error(\"fs.read is not available in the scriptc island (whole-file reads/writes only)\");\n"
@@ -4202,7 +4340,7 @@ static const char isl_modules_bootstrap[] =
     "  };\n"
     "  return fs;\n"
     "}\n"
-    "    const fs = makeFs({ fs: (...a) => host.fs(...a), fsConstants: () => host.fsConstants(), Buffer: builtins.buffer().Buffer, Readable: builtins.stream().Readable, Writable: builtins.stream().Writable, nextTick: (fn) => queueMicrotask(fn) });\n"
+    "    const fs = makeFs({ fs: (...a) => host.fs(...a), fsConstants: () => host.fsConstants(), rename: (a, b) => host.rename(a, b), Buffer: builtins.buffer().Buffer, Readable: builtins.stream().Readable, Writable: builtins.stream().Writable, nextTick: (fn) => queueMicrotask(fn) });\n"
     "    fs.default = fs;\n"
     "    return fs;\n"
     "  });\n"
@@ -9184,6 +9322,7 @@ static const char isl_modules_bootstrap[] =
     "      versions: { node: host.versions()[0], openssl: host.versions()[1] },\n"
     "      pid: host.pid(),\n"
     "      ppid: 0,\n"
+    "      kill: (pid, signal = 0) => host.kill(Number(pid), typeof signal === 'number' ? signal : 0),\n"
     "      title: 'scriptc',\n"
     "      argv0: 'scriptc',\n"
     "      release: { name: 'node' },\n"
@@ -9192,33 +9331,62 @@ static const char isl_modules_bootstrap[] =
     "      exitCode: undefined,\n"
     "      stdout: stream(1),\n"
     "      stderr: stream(2),\n"
-    /* stdin: a REAL Readable over a whole-input host read (the formatter idiom's
-     * get-stdin async-iterates it when no file arguments arrive). The
-     * host read happens lazily on the first pull — a program that only
-     * probes isTTY or registers listeners never blocks on a silent pipe,
-     * and get-stdin's isTTY early-return keeps interactive terminals
-     * away from the read entirely. One chunk, then EOF: the island's
-     * stdio is whole-value like its fs (no partial-read backpressure to
-     * report). setRawMode stays accepted-and-inert — there is no raw
-     * TTY bridge. */
+    /* stdin: preserve whole-input reads for pipes, but provide a polling
+     * raw-TTY bridge for interactive npm-island programs. The host returns
+     * explicit would-block/data/EOF states so empty reads are never ambiguous. */
     "      stdin: (() => {\n"
     "        const { Readable } = builtins.stream();\n"
     "        const Buffer = builtins.buffer().Buffer;\n"
+    "        const tty = host.isatty(0);\n"
     "        let pulled = false;\n"
-    "        const s = new Readable({\n"
+    "        let pollTimer;\n"
+    "        let ended = false;\n"
+    "        let s;\n"
+    "        const stopPolling = () => {\n"
+    "          if (pollTimer !== undefined) globalThis.clearInterval(pollTimer);\n"
+    "          pollTimer = undefined;\n"
+    "        };\n"
+    "        const restoreRawMode = () => {\n"
+    "          if (tty && s.isRaw) { host.setStdinRawMode(false); s.isRaw = false; }\n"
+    "        };\n"
+    "        s = new Readable({\n"
     "          read() {\n"
+    "            if (tty) {\n"
+    "              if (ended || pollTimer !== undefined) return;\n"
+    "              pollTimer = globalThis.setInterval(() => {\n"
+    "                try {\n"
+    "                  const result = host.readStdinChunk();\n"
+    "                  if (result.status === 1) {\n"
+    "                    this.push(Buffer.from(result.data));\n"
+    "                    if (this.isPaused()) stopPolling();\n"
+    "                  } else if (result.status === 2) { ended = true; stopPolling(); this.push(null); }\n"
+    "                } catch (error) { stopPolling(); this.destroy(error); }\n"
+    "              }, 5);\n"
+    "              return;\n"
+    "            }\n"
     "            if (pulled) return;\n"
     "            pulled = true;\n"
     "            const data = host.readStdin();\n"
     "            if (data.byteLength > 0) this.push(Buffer.from(data));\n"
     "            this.push(null);\n"
     "          },\n"
+    "          destroy(error, callback) {\n"
+    "            ended = true;\n"
+    "            stopPolling();\n"
+    "            restoreRawMode();\n"
+    "            callback(error);\n"
+    "          },\n"
     "        });\n"
     "        s.fd = 0;\n"
-    /* Node's process.stdin is a tty.ReadStream only when fd 0 IS a tty
-     * — pipes get a socket with NO setRawMode, and packages probe with
-     * `process.stdin.setRawMode?.()`. Mirror the shape, not a stub. */
-    "        if (host.isatty(0)) { s.isTTY = true; s.setRawMode = () => s; }\n"
+    "        if (tty) {\n"
+    "          s.isTTY = true;\n"
+    "          s.isRaw = false;\n"
+    "          s.setRawMode = (mode) => { host.setStdinRawMode(!!mode); s.isRaw = !!mode; return s; };\n"
+    "          const pause = s.pause.bind(s);\n"
+    "          s.pause = () => { const result = pause(); stopPolling(); return result; };\n"
+    "          const resume = s.resume.bind(s);\n"
+    "          s.resume = () => { const result = resume(); if (!ended) s.read(0); return result; };\n"
+    "        }\n"
     "        s.unref = () => s;\n"
     "        s.ref = () => s;\n"
     "        return s;\n"
@@ -9345,6 +9513,10 @@ static void isl_modules_boot(void) {
   JS_SetPropertyStr(isl_ctx, host, "write", JS_NewCFunction(isl_ctx, isl_host_write, "write", 2));
   JS_SetPropertyStr(isl_ctx, host, "readStdin",
                     JS_NewCFunction(isl_ctx, isl_host_read_stdin, "readStdin", 0));
+  JS_SetPropertyStr(isl_ctx, host, "readStdinChunk",
+                    JS_NewCFunction(isl_ctx, isl_host_read_stdin_chunk, "readStdinChunk", 0));
+  JS_SetPropertyStr(isl_ctx, host, "setStdinRawMode",
+                    JS_NewCFunction(isl_ctx, isl_host_set_stdin_raw_mode, "setStdinRawMode", 1));
   JS_SetPropertyStr(isl_ctx, host, "exit", JS_NewCFunction(isl_ctx, isl_host_exit, "exit", 1));
   JS_SetPropertyStr(isl_ctx, host, "setExitCode",
                     JS_NewCFunction(isl_ctx, isl_host_set_exit_code, "setExitCode", 1));
@@ -9357,6 +9529,8 @@ static void isl_modules_boot(void) {
   JS_SetPropertyStr(isl_ctx, host, "arch", JS_NewCFunction(isl_ctx, isl_host_arch, "arch", 0));
   JS_SetPropertyStr(isl_ctx, host, "hostname", JS_NewCFunction(isl_ctx, isl_host_hostname, "hostname", 0));
   JS_SetPropertyStr(isl_ctx, host, "pid", JS_NewCFunction(isl_ctx, isl_host_pid, "pid", 0));
+  JS_SetPropertyStr(isl_ctx, host, "kill", JS_NewCFunction(isl_ctx, isl_host_kill, "kill", 2));
+  JS_SetPropertyStr(isl_ctx, host, "rename", JS_NewCFunction(isl_ctx, isl_host_rename, "rename", 2));
   JS_SetPropertyStr(isl_ctx, host, "promiseState", JS_NewCFunction(isl_ctx, isl_host_promise_state, "promiseState", 1));
   JS_SetPropertyStr(isl_ctx, host, "digest", JS_NewCFunction(isl_ctx, isl_host_digest, "digest", 2));
   JS_SetPropertyStr(isl_ctx, host, "hmac", JS_NewCFunction(isl_ctx, isl_host_hmac, "hmac", 3));

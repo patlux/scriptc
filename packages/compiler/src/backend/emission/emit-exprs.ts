@@ -5903,6 +5903,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_fs_chown(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "fs.copyFileSync":
             return finish(`scr_fs_copyfile(${arg(0)}, ${arg(1)})`);
+          case "fs.renameSync":
+            return finish(`scr_fs_rename(${arg(0)}, ${arg(1)})`);
           case "fs.lstatSync":
             return finish(`scr_fs_lstat(${arg(0)})`);
           case "fs.writeFileModeSync":

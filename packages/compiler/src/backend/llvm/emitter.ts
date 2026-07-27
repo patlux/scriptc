@@ -277,6 +277,7 @@ const LIB_FN_SYMS: Record<string, string> = {
   "fs.unlinkSync": "scr_fs_unlink",
   "fs.chmodSync": "scr_fs_chmod",
   "fs.copyFileSync": "scr_fs_copyfile",
+  "fs.renameSync": "scr_fs_rename",
   "fs.accessSync": "scr_fs_access",
   // node:assert (scr_assert.c): all args borrowed; failures throw the
   // catchable AssertionError. The never-throwing members ride along.

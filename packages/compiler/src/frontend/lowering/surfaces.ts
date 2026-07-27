@@ -577,6 +577,7 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     // The 2-argument form only: Node's mode flags (COPYFILE_EXCL, ...)
     // land on the arity fence.
     copyFileSync: { fn: "fs.copyFileSync", params: [STRING, STRING], result: VOID },
+    renameSync: { fn: "fs.renameSync", params: [STRING, STRING], result: VOID },
     // statSync's no-follow sibling; stats.isSymbolicLink answers what the
     // follow-free snapshot saw.
     lstatSync: { fn: "fs.lstatSync", params: [STRING], result: STATS_T },

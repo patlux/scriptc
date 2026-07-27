@@ -3788,6 +3788,7 @@ export type IrLibFn =
   | "fs.chmodSync"
   | "fs.chownSync"
   | "fs.copyFileSync"
+  | "fs.renameSync"
   | "fs.lstatSync"
   /** fs.openSync(path, flags) → the raw fd as f64, and fs.closeSync(fd)
    * — the pair behind spawn's fd-stdio form. flags is Node's string
@@ -6778,6 +6779,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.chmodSync",
   "fs.chownSync",
   "fs.copyFileSync",
+  "fs.renameSync",
   "fs.lstatSync",
   "fs.writeFileModeSync",
   "fs.mkdirModeSync",

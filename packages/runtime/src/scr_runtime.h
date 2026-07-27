@@ -2010,6 +2010,7 @@ ScrStr *scr_atomics_wait(ScrBytes *arr, double idx, double expected, double time
 bool scr_process_is_tty(double fd);
 void scr_process_stdin_destroy(void);
 void scr_process_stdin_set_raw_mode(bool raw);
+void scr_process_stdin_restore_mode(void);
 
 /* Terminal width for process.stdout/stderr.columns (fd 1/2):
  * ioctl(TIOCGWINSZ), -1 when the fd is not a TTY or the ioctl refuses —
@@ -2403,6 +2404,7 @@ ScrStr *scr_path_win32_to_namespaced_path(ScrStr *path);
  * The pair behind spawn's fd-stdio form. */
 double scr_fs_open(ScrStr *path, ScrStr *flags);
 double scr_fs_read_sync(double fd, ScrBytes *buf, double offset, double length);
+void scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length);
 void scr_fs_close(double fd);
 
 /* ── WHATWG URL (scr_url.c) ──────────────────────────────────────────
