@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+import { resolveNativeTestPath } from "./tests/harness/native-test-toolchain.js";
 
 // Compiled-binary + oracle caches for the test lanes (see cc.ts's cache block
 // and tests/harness/README.md). Workers inherit SCRIPTC_CACHE_DIR from here;
@@ -14,6 +15,7 @@ const cacheDir =
 // worker pool (the default — all cores — is unchanged when unset). Full-suite
 // runs additionally queue behind an advisory lock; see suite-lock.mjs.
 const workers = process.env["SCRIPTC_TEST_WORKERS"];
+const nativeTestPath = resolveNativeTestPath(process.platform, process.env["PATH"]);
 
 export default defineConfig({
   resolve: {
@@ -37,7 +39,10 @@ export default defineConfig({
     // passing in 3s isolated and uncached).
     testTimeout: 300_000,
     hookTimeout: 300_000,
-    env: { SCRIPTC_CACHE_DIR: cacheDir },
+    env: {
+      SCRIPTC_CACHE_DIR: cacheDir,
+      ...(nativeTestPath !== undefined ? { PATH: nativeTestPath } : {}),
+    },
     ...(workers !== undefined && workers !== ""
       ? { maxWorkers: Number(workers), minWorkers: 1 }
       : {}),
