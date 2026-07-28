@@ -161,7 +161,7 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     const init = stripTypeCasts(decl.initializer);
     if (ts.isCallExpression(init)) {
       const cr = createRequireSpecOf(L, init);
-      module = cr !== null && cr.spec !== null ? canonicalBuiltinModule(cr.spec) : null;
+      module = cr !== null && cr.mode === "require" && cr.spec !== null ? canonicalBuiltinModule(cr.spec) : null;
     } else if (ts.isIdentifier(init)) {
       module = L.builtinNamespaceModuleOf(init);
     }
@@ -256,16 +256,90 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     return createRequireBaseCallOf(L, decl.initializer) !== null ? decl.getSourceFile() : null;
   }
 
-/** The static require of `R("spec")` through a createRequire binding:
-   * the literal specifier plus the file anchoring relative resolution.
-   * Null when the callee is not a createRequire-made require; a matching
-   * callee with a non-literal (or missing) specifier answers spec null,
-   * so the call lowering fences by name instead of falling through to
-   * the generic call paths. */
+/** The finite build-known strings an expression can produce. Deliberately
+   * small and side-effect free: literals, literal concatenation, ternaries,
+   * const aliases, and a for-of binding over a literal/const array. */
+  export function finiteCreateRequireSpecsOf(L: Lowerer, expr: ts.Expression): string[] | null {
+    const seen = new Set<ts.Symbol>();
+    const merge = (parts: readonly string[][]): string[] | null => {
+      const out = new Set<string>();
+      for (const part of parts) {
+        for (const value of part) {
+          out.add(value);
+          if (out.size > 16) return null;
+        }
+      }
+      return [...out];
+    };
+    const visitArray = (node: ts.Expression): string[] | null => {
+      const e = stripTypeCasts(node);
+      if (ts.isArrayLiteralExpression(e) && !e.elements.some(ts.isSpreadElement)) {
+        const parts: string[][] = [];
+        for (const element of e.elements) {
+          if (ts.isOmittedExpression(element)) return null;
+          const values = visit(element);
+          if (values === null) return null;
+          parts.push(values);
+        }
+        return merge(parts);
+      }
+      if (!ts.isIdentifier(e)) return null;
+      const symbol = L.resolveValueSymbol(e);
+      if (symbol === null || seen.has(symbol)) return null;
+      const decl = L.checker.valueDeclarationOf(symbol);
+      if (
+        decl === undefined || !ts.isVariableDeclaration(decl) || decl.initializer === undefined ||
+        !ts.isVariableDeclarationList(decl.parent) || (decl.parent.flags & ts.NodeFlags.Const) === 0
+      ) {
+        return null;
+      }
+      seen.add(symbol);
+      const result = visitArray(decl.initializer);
+      seen.delete(symbol);
+      return result;
+    };
+    const visit = (node: ts.Expression): string[] | null => {
+      const e = stripTypeCasts(node);
+      if (ts.isStringLiteralLike(e)) return [e.text];
+      if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        const left = visit(e.left);
+        const right = visit(e.right);
+        if (left === null || right === null || left.length * right.length > 16) return null;
+        return merge(left.flatMap((a) => right.map((b) => `${a}${b}`)).map((s) => [s]));
+      }
+      if (ts.isConditionalExpression(e)) {
+        const whenTrue = visit(e.whenTrue);
+        const whenFalse = visit(e.whenFalse);
+        return whenTrue === null || whenFalse === null ? null : merge([whenTrue, whenFalse]);
+      }
+      if (!ts.isIdentifier(e)) return null;
+      const symbol = L.resolveValueSymbol(e);
+      if (symbol === null || seen.has(symbol)) return null;
+      const decl = L.checker.valueDeclarationOf(symbol);
+      if (decl === undefined || !ts.isVariableDeclaration(decl)) return null;
+      if (ts.isVariableDeclarationList(decl.parent) && ts.isForOfStatement(decl.parent.parent)) {
+        return visitArray(decl.parent.parent.expression);
+      }
+      if (
+        decl.initializer === undefined || !ts.isVariableDeclarationList(decl.parent) ||
+        (decl.parent.flags & ts.NodeFlags.Const) === 0
+      ) {
+        return null;
+      }
+      seen.add(symbol);
+      const result = visit(decl.initializer);
+      seen.delete(symbol);
+      return result;
+    };
+    return visit(expr);
+  }
+
+/** A call through a createRequire binding: finite specifiers plus the file
+   * anchoring resolution. `spec` is present only for the singleton form. */
   export function createRequireSpecOf(
     L: Lowerer,
     call: ts.CallExpression,
-  ): { spec: string | null; baseFile: ts.SourceFile; mode: "require" | "resolve" } | null {
+  ): { spec: string | null; specs: string[] | null; arg: ts.Expression | null; baseFile: ts.SourceFile; mode: "require" | "resolve" } | null {
     if (call.questionDotToken) return null;
     let callee = call.expression;
     let mode: "require" | "resolve" = "require";
@@ -275,9 +349,10 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     }
     const baseFile = createRequireCalleeFileOf(L, callee);
     if (baseFile === null) return null;
-    if (call.arguments.length !== 1) return { spec: null, baseFile, mode };
-    const a = call.arguments[0]!;
-    return { spec: ts.isStringLiteralLike(a) ? a.text : null, baseFile, mode };
+    if (call.arguments.length !== 1) return { spec: null, specs: null, arg: null, baseFile, mode };
+    const arg = call.arguments[0]!;
+    const specs = finiteCreateRequireSpecsOf(L, arg);
+    return { spec: specs?.length === 1 ? specs[0]! : null, specs, arg, baseFile, mode };
   }
 
 /** True for `const fs = require("node:fs")` through a createRequire
@@ -290,7 +365,7 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
     const call = stripTypeCasts(init);
     if (!ts.isCallExpression(call)) return false;
     const cr = createRequireSpecOf(L, call);
-    return cr !== null && cr.spec !== null && canonicalBuiltinModule(cr.spec) !== null;
+    return cr !== null && cr.mode === "require" && cr.spec !== null && canonicalBuiltinModule(cr.spec) !== null;
   }
 
 /** `require("spec")` through a createRequire binding — the erasure per
@@ -311,14 +386,48 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
   export function lowerCreateRequireCall(L: Lowerer, call: ts.CallExpression, loc: SrcLoc): IrExpr | null {
     const cr = createRequireSpecOf(L, call);
     if (cr === null) return null;
+    if (cr.specs !== null && cr.specs.length > 1 && cr.arg !== null) {
+      const arg = L.lowerExpr(cr.arg);
+      if (arg.type.kind !== "string") L.badType(cr.arg, L.typeOf(cr.arg));
+      const expected = L.irTypeOf(call);
+      const arm = (spec: string): IrExpr => L.coerceInto(call, lowerCreateRequireSpec(L, cr, spec, loc), expected);
+      let result = arm(cr.specs[cr.specs.length - 1]!);
+      for (const spec of cr.specs.slice(0, -1).reverse()) {
+        result = {
+          kind: "ternary",
+          cond: {
+            kind: "strEq",
+            negated: false,
+            left: arg,
+            right: { kind: "strLit", value: spec, type: STRING, loc },
+            type: BOOL,
+            loc,
+          },
+          then: arm(spec),
+          else_: result,
+          type: expected,
+          loc,
+        };
+      }
+      return result;
+    }
     if (cr.spec === null) {
       L.noLowering(
         "createRequire's require with this argument shape",
         call,
-        "the compiled module graph is fixed at build time — the one lowered form is require(\"<static string literal>\")",
+        "the compiled module graph is fixed at build time — use a finite build-known set of string literals",
       );
     }
-    const spec = cr.spec;
+    return lowerCreateRequireSpec(L, cr, cr.spec, loc);
+  }
+
+  function lowerCreateRequireSpec(
+    L: Lowerer,
+    cr: NonNullable<ReturnType<typeof createRequireSpecOf>>,
+    spec: string,
+    loc: SrcLoc,
+  ): IrExpr {
+    const call = cr.arg ?? cr.baseFile;
     if (cr.mode === "resolve") {
       try {
         const resolveFromFile = createRequire(cr.baseFile.fileName).resolve;

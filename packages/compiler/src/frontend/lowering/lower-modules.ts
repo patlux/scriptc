@@ -447,33 +447,32 @@ export interface FileParts {
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         const cr = createRequireSpecOf(L, node);
-        const spec = cr?.spec ?? null;
-        if (
-          cr !== null &&
-          cr.mode === "require" &&
-          spec !== null &&
-          canonicalBuiltinModule(spec) === null &&
-          !isRelativeSpecifier(spec) &&
-          !spec.startsWith("/") &&
-          !spec.startsWith("#") &&
-          probeNodeRequireRefusal(cr.baseFile.fileName, spec) === null
-        ) {
-          const pkgName = spec.startsWith("@")
-            ? spec.split("/").slice(0, 2).join("/")
-            : spec.split("/")[0]!;
-          const mapKey = `${cr.baseFile.fileName}\u0000${spec}`;
-          if (!L.createRequireImports.has(mapKey) && !isNpmStaticPackage(pkgName)) {
-            const before = builder.errors.length;
-            const entryKey = builder.addRequire(cr.baseFile.fileName, spec);
-            for (const err of builder.errors.slice(before)) {
-              L.pushDiag(npmEmbedFailedDiag(err.message, locOf(node)));
+        if (cr !== null && cr.mode === "require" && cr.specs !== null) {
+          for (const spec of cr.specs) {
+            if (
+              canonicalBuiltinModule(spec) !== null ||
+              isRelativeSpecifier(spec) || spec.startsWith("/") || spec.startsWith("#") ||
+              probeNodeRequireRefusal(cr.baseFile.fileName, spec) !== null
+            ) {
+              continue;
             }
-            L.createRequireImports.set(
-              mapKey,
-              entryKey === null
-                ? ""
-                : { entryKey, format: builder.moduleFormatOf(entryKey) ?? "cjs" },
-            );
+            const pkgName = spec.startsWith("@")
+              ? spec.split("/").slice(0, 2).join("/")
+              : spec.split("/")[0]!;
+            const mapKey = `${cr.baseFile.fileName}\u0000${spec}`;
+            if (!L.createRequireImports.has(mapKey) && !isNpmStaticPackage(pkgName)) {
+              const before = builder.errors.length;
+              const entryKey = builder.addRequire(cr.baseFile.fileName, spec);
+              for (const err of builder.errors.slice(before)) {
+                L.pushDiag(npmEmbedFailedDiag(err.message, locOf(node)));
+              }
+              L.createRequireImports.set(
+                mapKey,
+                entryKey === null
+                  ? ""
+                  : { entryKey, format: builder.moduleFormatOf(entryKey) ?? "cjs" },
+              );
+            }
           }
         }
       }

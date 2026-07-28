@@ -49,10 +49,10 @@ async function build(entry: string, backend?: "c"): Promise<string> {
   return result.binaryPath;
 }
 
-async function expectDifferential(entryName: string, backend?: "c"): Promise<void> {
+async function expectDifferential(entryName: string, backend?: "c", argv: string[] = []): Promise<void> {
   const entry = join(fixtureRoot, entryName);
   const binary = await build(entry, backend);
-  const [nodeResult, nativeResult] = await Promise.all([run("node", [entry]), run(binary, [])]);
+  const [nodeResult, nativeResult] = await Promise.all([run("node", [entry, ...argv]), run(binary, argv)]);
   expect(nativeResult.stdout.toString("utf8")).toBe(nodeResult.stdout.toString("utf8"));
   expect(nativeResult.exitCode).toBe(nodeResult.exitCode);
 }
@@ -61,4 +61,10 @@ describe(`createRequire admission${sanitize ? " (sanitized)" : ""}`, () => {
   test.for([undefined, "c"] as const)("literal require.resolve byte-matches Node (%s backend)", async (backend) => {
     await expectDifferential("literal-resolve.js", backend);
   }, 120_000);
+
+  test.for([undefined, "c"] as const)("finite require specifier sets byte-match Node (%s backend)", async (backend) => {
+    await expectDifferential("finite-set.js", backend, ["present"]);
+    await expectDifferential("finite-set.js", backend);
+  }, 120_000);
+
 });
