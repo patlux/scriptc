@@ -3,7 +3,7 @@
  * methods), JSON.parse/stringify, process properties/methods and
  * process.env access, and console.log detection. */
 import { readFileSync } from "node:fs";
-import { builtinModules } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
@@ -265,13 +265,19 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
   export function createRequireSpecOf(
     L: Lowerer,
     call: ts.CallExpression,
-  ): { spec: string | null; baseFile: ts.SourceFile } | null {
+  ): { spec: string | null; baseFile: ts.SourceFile; mode: "require" | "resolve" } | null {
     if (call.questionDotToken) return null;
-    const baseFile = createRequireCalleeFileOf(L, call.expression);
+    let callee = call.expression;
+    let mode: "require" | "resolve" = "require";
+    if (ts.isPropertyAccessExpression(callee) && !callee.questionDotToken && callee.name.text === "resolve") {
+      callee = callee.expression;
+      mode = "resolve";
+    }
+    const baseFile = createRequireCalleeFileOf(L, callee);
     if (baseFile === null) return null;
-    if (call.arguments.length !== 1) return { spec: null, baseFile };
+    if (call.arguments.length !== 1) return { spec: null, baseFile, mode };
     const a = call.arguments[0]!;
-    return { spec: ts.isStringLiteralLike(a) ? a.text : null, baseFile };
+    return { spec: ts.isStringLiteralLike(a) ? a.text : null, baseFile, mode };
   }
 
 /** True for `const fs = require("node:fs")` through a createRequire
@@ -313,6 +319,16 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
       );
     }
     const spec = cr.spec;
+    if (cr.mode === "resolve") {
+      try {
+        const resolveFromFile = createRequire(cr.baseFile.fileName).resolve;
+        return { kind: "strLit", value: resolveFromFile(spec), type: STRING, loc };
+      } catch {
+        const refusal = probeNodeRequireRefusal(cr.baseFile.fileName, spec);
+        const message = refusal?.message ?? `Cannot find module '${spec}'\nRequire stack:\n- ${resolve(cr.baseFile.fileName)}`;
+        return nodeThrowExpr(0, "MODULE_NOT_FOUND", message, STRING, loc);
+      }
+    }
     if (canonicalBuiltinModule(spec) !== null) {
       L.unsupported(
         "SC1090",

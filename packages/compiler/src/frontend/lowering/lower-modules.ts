@@ -450,6 +450,7 @@ export interface FileParts {
         const spec = cr?.spec ?? null;
         if (
           cr !== null &&
+          cr.mode === "require" &&
           spec !== null &&
           canonicalBuiltinModule(spec) === null &&
           !isRelativeSpecifier(spec) &&
