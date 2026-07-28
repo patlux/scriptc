@@ -1,18 +1,18 @@
 // Set support boundaries: what stays rejected at LOWERING, with specific
-// messages. Elements are Map's KEY types (string or number — SameValueZero
-// hashing is honest for exactly those); everything else is fenced.
+// messages. Static elements include numbers/strings and supported identity
+// handles; `any` additionally lowers under --dynamic. Other types fence.
 
 // Array seeds lower (`new Set(["a", "b"])` is a corpus program now); a
 // non-array seed — another Set, any iterable — typechecks against the lib
 // but keeps the fence: never silently an empty set.
 const seeded = new Set(new Set(["a", "b"]));
 
-// Elements must be string or number — the new-site diagnostic names the
-// element type.
+// Boolean elements remain outside the supported domains; the new-site
+// diagnostic names the element type.
 const byFlag = new Set<boolean>();
 
-// Record elements would need pointer-identity hashing and cycle tracing —
-// fenced for now.
+// Static record elements would need pointer-identity hashing and cycle
+// tracing — fenced for now.
 const recs = new Set<{ id: number }>();
 
 // Set-typed slots elsewhere report the ordinary unsupported-type diagnostic.

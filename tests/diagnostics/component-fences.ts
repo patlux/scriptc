@@ -9,7 +9,7 @@ console.log(byFlag);
 const listeners = new Map<string, () => void>();
 console.log(listeners);
 
-// Set elements are limited to numbers and strings.
+// Set elements are limited to supported scalar/identity domains.
 const flags = new Set<boolean>();
 console.log(flags);
 
