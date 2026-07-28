@@ -3806,6 +3806,10 @@ long scr_promise_live_count(void);
  * this declaration or call. SCRIPTC_RUNTIME_TRACE must name an absolute path;
  * invalid/unwritable paths never change output or exit status. */
 void scr_island_trace_install(void);
+/* Write the trace now (idempotent). atexit covers the normal loop-drain
+ * exit; explicit process.exit(_Exit) skips atexit, so its runtime path
+ * flushes through this before terminating. */
+void scr_island_trace_flush(void);
 
 /* Evaluate UTF-8 source in the island's global scope; returns
  * String(result) as a +1 ScrStr. Borrows code. An island exception is

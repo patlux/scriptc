@@ -1060,7 +1060,12 @@ void scr_process_exit(double code) {
   if (scr_process_exit_hook != NULL) scr_process_exit_hook(code);
   /* _Exit skips atexit handlers on purpose: no further code runs (matching
    * Node), and the RC audit is meaningless mid-program (live values are
-   * expected). scr_init's flush-at-exit is also skipped — flush here. */
+   * expected). scr_init's flush-at-exit is also skipped — flush here. The
+   * runtime-path trace still flushes on this path: explicit exit is normal
+   * teardown for the trace contract and touches no engine state. */
+#ifdef SCR_DYNAMIC
+  scr_island_trace_flush();
+#endif
   scr_process_stdin_restore_mode();
   fflush(stdout);
   _Exit((int)code);

@@ -157,6 +157,20 @@ for (const requestedBackend of ["c", "default"] as const) {
       expect(trace.entryCountsByReason.regex).toBeGreaterThanOrEqual(1);
     });
 
+    test("explicit process.exit still flushes the trace once", async () => {
+      const source = `console.log(__island_eval("1 + 1"));\nprocess.exit(0);\n`;
+      const built = await build("explicit-exit", source, true, requestedBackend);
+      const tracePath = join(cacheDir, `exit-${requestedBackend}-${process.pid}-${sanitize ? "san" : "plain"}.json`);
+      rmSync(tracePath, { force: true });
+      const result = await run(built.binaryPath, tracePath);
+      expect(result.stdout).toBe("2\n");
+      expect(result.stderr).toBe("");
+      const trace = readTrace(tracePath);
+      expect(trace.quickjsInitialized).toBe(true);
+      expect(trace.islandInitializationCount).toBe(1);
+      expect(trace.entryCountsByReason.eval).toBe(1);
+    });
+
     test("trace write failures do not affect product behavior or leave temp files", async () => {
       const built = await build("write-failure", islandSource, true, requestedBackend);
       const targetDir = join(cacheDir, `trace-write-failure-${requestedBackend}-${process.pid}-${sanitize ? "san" : "plain"}`);

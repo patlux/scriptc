@@ -171,8 +171,11 @@ static bool isl_trace_path_absolute(const char *path) {
 #endif
 }
 
-static void isl_trace_write_at_exit(void) {
-  if (!isl_trace_path) return;
+static bool isl_trace_written = false;
+
+void scr_island_trace_flush(void) {
+  if (!isl_trace_path || isl_trace_written) return;
+  isl_trace_written = true;
   size_t path_len = strlen(isl_trace_path);
   char *tmp = malloc(path_len + 48);
   if (!tmp) return;
@@ -212,7 +215,7 @@ void scr_island_trace_install(void) {
   char *copy = malloc(len + 1);
   if (!copy) return;
   memcpy(copy, path, len + 1);
-  if (atexit(isl_trace_write_at_exit) != 0) {
+  if (atexit(scr_island_trace_flush) != 0) {
     free(copy);
     return;
   }
@@ -2929,7 +2932,10 @@ static JSValue isl_host_exit(JSContext *ctx, JSValueConst this_val, int argc,
   /* Node's process.exit: no unwinding, no destructors — and no atexit
    * teardown here either (tearing the engine down from inside JS_Call
    * would free live frames). The RC/engine audits are documented to not
-   * run on this path. */
+   * run on this path. The runtime-path trace still flushes: explicit exit
+   * is normal teardown for the trace contract, and the flush only writes
+   * one file — it never touches engine state. */
+  scr_island_trace_flush();
   scr_process_stdin_restore_mode();
   fflush(NULL);
   _exit(code);
