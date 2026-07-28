@@ -117,6 +117,21 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   }, 120_000);
 
   test.for([undefined, "c"] as const)(
+    "extends an npm class whose runtime declaration joined the static graph (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "event-stream-extends-cli.ts");
+      const binary = await buildStatic(entry, ["event-stream-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test.for([undefined, "c"] as const)(
     "node:module with literal createRequire edges stays statically admitted (%s backend)",
     async (backend) => {
       const entry = join(pilotRoot, "create-require-static-cli.ts");
