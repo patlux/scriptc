@@ -228,8 +228,9 @@ static void isl_install_module_loader(void);
 /* Defined with the host-function machinery below; called from isl_init. */
 static void isl_register_hostfn_class(void);
 /* Defined with the island → static promise bridge below; called from the
- * host-function registration (both classes register together). */
+ * host-function registration (the host-owned handle classes register together). */
 static void isl_register_bridge_class(void);
+static void isl_register_child_classes(void);
 /* Defined with the loop-io machinery below; registered by isl_init. */
 static bool isl_io_pending(void);
 static void isl_io_poll(double max_wait_ms);
@@ -1738,6 +1739,7 @@ static void isl_register_hostfn_class(void) {
   JS_NewClassID(isl_rt, &isl_dynfn_class_id);
   JS_NewClass(isl_rt, isl_dynfn_class_id, &isl_dynfn_class);
   isl_register_bridge_class();
+  isl_register_child_classes();
 }
 
 /* Pending scriptc exception → engine VALUE (reverse bridge); clears the
@@ -2337,9 +2339,10 @@ ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems) {
  * takes named exports off module.exports directly, so user-level named
  * imports of CJS-only packages work like Node too.
  * Node builtins are served as wrappers over island shims defined in the
- * bootstrap: events, path, process, os, diagnostics_channel, fs (stubs),
- * child_process (throwing stubs), module (createRequire over the embedded
- * tables), url (fileURLToPath/pathToFileURL). The process shim bridges REAL
+ * bootstrap: events, path, process, os, diagnostics_channel, fs (whole-file
+ * operations plus the bounded fd/FileHandle slice), child_process (async
+ * spawn with piped output), module (createRequire over the embedded tables),
+ * url (fileURLToPath/pathToFileURL). The process shim bridges REAL
  * argv/env/stdout/stderr/exit
  * through host functions, argv in the same ["scriptc", argv[0], ...]
  * shape as the static world's process.argv. */
@@ -2356,6 +2359,7 @@ ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems) {
 #include <signal.h>
 #include <sys/stat.h>
 #ifdef _WIN32
+#include <io.h>
 #include <winsock2.h>
 #endif
 
@@ -2951,6 +2955,113 @@ static ScrStr *isl_arg_str(JSContext *ctx, JSValueConst v) {
   return out;
 }
 
+typedef struct {
+  double fd;
+  bool closed;
+} IslFileHandle;
+
+static JSClassID isl_file_handle_class_id = 0;
+
+static void isl_file_handle_finalizer(JSRuntime *rt, JSValueConst val) {
+  (void)rt;
+  IslFileHandle *h = JS_GetOpaque(val, isl_file_handle_class_id);
+  if (!h) return;
+  if (!h->closed) {
+    scr_fs_close(h->fd);
+    if (scr_exc_pending()) scr_exc_clear();
+  }
+  free(h);
+}
+
+static const JSClassDef isl_file_handle_class = {
+    .class_name = "ScrFileHandle",
+    .finalizer = isl_file_handle_finalizer,
+};
+
+static JSValue isl_host_fs_handle(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  const char *op = JS_ToCString(ctx, argv[0]);
+  if (!op) return JS_EXCEPTION;
+  IslFileHandle *h = JS_GetOpaque2(ctx, argv[1], isl_file_handle_class_id);
+  if (!h) {
+    JS_FreeCString(ctx, op);
+    return JS_EXCEPTION;
+  }
+  if (h->closed) {
+    JS_FreeCString(ctx, op);
+    return JS_ThrowTypeError(ctx, "file closed");
+  }
+  JSValue ret = JS_UNDEFINED;
+  if (strcmp(op, "read") == 0) {
+    double offset = 0;
+    double length = 0;
+    double position = 0;
+    int32_t has_position = 0;
+    size_t len = 0;
+    if (JS_ToFloat64(ctx, &offset, argv[3]) || JS_ToFloat64(ctx, &length, argv[4]) ||
+        JS_ToInt32(ctx, &has_position, argv[5]) ||
+        (has_position && JS_ToFloat64(ctx, &position, argv[6]))) {
+      ret = JS_EXCEPTION;
+    } else {
+      uint8_t *buf = JS_GetUint8Array(ctx, &len, argv[2]);
+      if (buf || len == 0) {
+        ScrBytes *bytes = scr_bytes_new(SCR_BYTES_U8, (double)len);
+        if (!bytes) {
+          ret = JS_EXCEPTION;
+        } else {
+          if (buf && len > 0) memcpy(bytes->data, buf, len);
+          int64_t saved_position = -1;
+          if (has_position) {
+#ifdef _WIN32
+            saved_position = _lseeki64((int)h->fd, 0, SEEK_CUR);
+            if (saved_position >= 0 && _lseeki64((int)h->fd, (int64_t)position, SEEK_SET) < 0) saved_position = -1;
+#else
+            saved_position = (int64_t)lseek((int)h->fd, 0, SEEK_CUR);
+            if (saved_position >= 0 && lseek((int)h->fd, (off_t)position, SEEK_SET) < 0) saved_position = -1;
+#endif
+            if (saved_position < 0) {
+              ScrStr *empty = scr_str_new("", 0);
+              scr_fs_throw(errno, "read", empty);
+              scr_str_release(empty);
+            }
+          }
+          double read_count = scr_exc_pending() ? 0 : scr_fs_read_sync(h->fd, bytes, offset, length);
+          if (has_position && saved_position >= 0) {
+#ifdef _WIN32
+            if (_lseeki64((int)h->fd, saved_position, SEEK_SET) < 0 && !scr_exc_pending()) {
+#else
+            if (lseek((int)h->fd, (off_t)saved_position, SEEK_SET) < 0 && !scr_exc_pending()) {
+#endif
+              ScrStr *empty = scr_str_new("", 0);
+              scr_fs_throw(errno, "read", empty);
+              scr_str_release(empty);
+            }
+          }
+          if (!scr_exc_pending() && buf && len > 0) memcpy(buf, bytes->data, len);
+          scr_bytes_release(bytes);
+          if (!scr_exc_pending()) ret = JS_NewFloat64(ctx, read_count);
+        }
+      } else {
+        ret = JS_EXCEPTION;
+      }
+    }
+  } else if (strcmp(op, "close") == 0) {
+    scr_fs_close(h->fd);
+    if (!scr_exc_pending()) h->closed = true;
+  } else {
+    ret = JS_ThrowReferenceError(ctx, "unknown island file-handle op");
+  }
+  JS_FreeCString(ctx, op);
+  if (JS_IsException(ret)) return ret;
+  if (scr_exc_pending()) {
+    JS_FreeValue(ctx, ret);
+    return isl_throw_pending(ctx);
+  }
+  return ret;
+}
+
 static JSValue isl_host_fs(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
   (void)this_val;
@@ -2983,10 +3094,30 @@ static JSValue isl_host_fs(JSContext *ctx, JSValueConst this_val, int argc,
     } else {
       ret = JS_EXCEPTION;
     }
-  } else if (strcmp(op, "open") == 0) {
+  } else if (strcmp(op, "open") == 0 || strcmp(op, "openHandle") == 0) {
     ScrStr *flags = isl_arg_str(ctx, argv[2]);
     if (flags) {
-      ret = JS_NewFloat64(ctx, scr_fs_open(a, flags));
+      double fd = scr_fs_open(a, flags);
+      if (!scr_exc_pending()) {
+        if (strcmp(op, "openHandle") == 0) {
+          IslFileHandle *h = malloc(sizeof *h);
+          if (!h) {
+            fprintf(stderr, "scriptc: out of memory\n");
+            abort();
+          }
+          h->fd = fd;
+          h->closed = false;
+          ret = JS_NewObjectClass(ctx, isl_file_handle_class_id);
+          if (JS_IsException(ret)) {
+            scr_fs_close(fd);
+            free(h);
+          } else {
+            JS_SetOpaque(ret, h);
+          }
+        } else {
+          ret = JS_NewFloat64(ctx, fd);
+        }
+      }
       scr_str_release(flags);
     } else {
       ret = JS_EXCEPTION;
@@ -3140,6 +3271,289 @@ static JSValue isl_host_fs(JSContext *ctx, JSValueConst this_val, int argc,
     return isl_throw_pending(ctx);
   }
   return ret;
+}
+
+/* child_process bridge: the island shim rides scr_child.c's existing
+ * asynchronous child/pipe/event-loop implementation. JS callback values
+ * live in ordinary ScrClosure capture boxes, so child/stream registries own
+ * them until the matching terminal event and teardown stays audit-clean. */
+typedef struct {
+  ScrChild *child;
+} IslChildHandle;
+
+static JSClassID isl_child_class_id = 0;
+
+static void isl_child_finalizer(JSRuntime *rt, JSValueConst val) {
+  (void)rt;
+  IslChildHandle *h = JS_GetOpaque(val, isl_child_class_id);
+  if (!h) return;
+  scr_child_release(h->child);
+  free(h);
+}
+
+static const JSClassDef isl_child_class = {
+    .class_name = "ScrChildProcess",
+    .finalizer = isl_child_finalizer,
+};
+
+static ScrClosure *isl_child_callback(JSContext *ctx, JSValueConst fn, void *body) {
+  ScrJsval *cell = isl_cell_new(JS_DupValue(ctx, fn));
+  ScrBox *box = scr_box_new_obj(scr_jsval_retain_v, scr_jsval_release_v, NULL);
+  scr_box_set_ref(box, cell);
+  ScrClosure *cb = scr_closure_new(body, 1);
+  cb->caps[0] = box;
+  return cb;
+}
+
+static void isl_child_call(ScrClosure *env, int argc, JSValueConst *argv) {
+  ScrJsval *cell = scr_box_get_ref(env->caps[0]);
+  scr_island_host_enter();
+  JSValue r = JS_Call(isl_ctx, cell->v, JS_UNDEFINED, argc, argv);
+  if (JS_IsException(r)) isl_bridge_exception();
+  else JS_FreeValue(isl_ctx, r);
+  scr_jsval_release(cell);
+}
+
+static void isl_child_exit_cb(ScrClosure *env, bool has_code, double code,
+                              const char *signal_name) {
+  JSValue argv[2] = {
+      has_code ? JS_NewFloat64(isl_ctx, code) : JS_NULL,
+      signal_name ? JS_NewString(isl_ctx, signal_name) : JS_NULL,
+  };
+  isl_child_call(env, 2, argv);
+  JS_FreeValue(isl_ctx, argv[0]);
+  JS_FreeValue(isl_ctx, argv[1]);
+}
+
+static void isl_child_error_cb(ScrClosure *env, ScrStr *msg) {
+  JSValue argv[1] = {JS_NewStringLen(isl_ctx, msg->data, msg->len)};
+  isl_child_call(env, 1, argv);
+  JS_FreeValue(isl_ctx, argv[0]);
+}
+
+static void isl_child_data_cb(ScrClosure *env, ScrBytes *chunk) {
+  JSValue argv[1] = {JS_NewUint8ArrayCopy(isl_ctx, chunk->data, (size_t)scr_bytes_len(chunk))};
+  isl_child_call(env, 1, argv);
+  JS_FreeValue(isl_ctx, argv[0]);
+}
+
+static void isl_child_end_cb(ScrClosure *env) { isl_child_call(env, 0, NULL); }
+
+static ScrArr *isl_child_string_array(JSContext *ctx, JSValueConst value) {
+  JSValue lenv = JS_GetPropertyStr(ctx, value, "length");
+  uint32_t n = 0;
+  if (JS_ToUint32(ctx, &n, lenv)) {
+    JS_FreeValue(ctx, lenv);
+    return NULL;
+  }
+  JS_FreeValue(ctx, lenv);
+  ScrArr *out = scr_arr_new(SCR_ELEM_STR, n);
+  for (uint32_t i = 0; i < n; i++) {
+    JSValue item = JS_GetPropertyUint32(ctx, value, i);
+    ScrStr *s = isl_arg_str(ctx, item);
+    JS_FreeValue(ctx, item);
+    if (!s) {
+      scr_arr_release(out);
+      return NULL;
+    }
+    scr_arr_push_ref(out, s);
+  }
+  return out;
+}
+
+static ScrArr *isl_child_env_array(JSContext *ctx, JSValueConst env) {
+  JSPropertyEnum *props = NULL;
+  uint32_t nprops = 0;
+  if (JS_GetOwnPropertyNames(ctx, &props, &nprops, env,
+                             JS_GPN_ENUM_ONLY | JS_GPN_STRING_MASK) < 0) {
+    return NULL;
+  }
+  ScrArr *out = scr_arr_new(SCR_ELEM_STR, nprops * 2);
+  for (uint32_t i = 0; i < nprops; i++) {
+    const char *key = JS_AtomToCString(ctx, props[i].atom);
+    JSValue value = JS_GetProperty(ctx, env, props[i].atom);
+    if (!key || JS_IsException(value)) {
+      if (key) JS_FreeCString(ctx, key);
+      JS_FreeValue(ctx, value);
+      JS_FreePropertyEnum(ctx, props, nprops);
+      scr_arr_release(out);
+      return NULL;
+    }
+    if (!JS_IsUndefined(value)) {
+      const char *val = JS_ToCString(ctx, value);
+      if (!val) {
+        JS_FreeCString(ctx, key);
+        JS_FreeValue(ctx, value);
+        JS_FreePropertyEnum(ctx, props, nprops);
+        scr_arr_release(out);
+        return NULL;
+      }
+      scr_arr_push_ref(out, scr_str_new(key, strlen(key)));
+      scr_arr_push_ref(out, scr_str_new(val, strlen(val)));
+      JS_FreeCString(ctx, val);
+    }
+    JS_FreeCString(ctx, key);
+    JS_FreeValue(ctx, value);
+  }
+  JS_FreePropertyEnum(ctx, props, nprops);
+  return out;
+}
+
+static JSValue isl_host_child_spawn(JSContext *ctx, JSValueConst this_val, int argc,
+                                    JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  ScrStr *cmd = isl_arg_str(ctx, argv[0]);
+  ScrArr *args = cmd ? isl_child_string_array(ctx, argv[1]) : NULL;
+  if (!cmd || !args) {
+    scr_str_release(cmd);
+    scr_arr_release(args);
+    return JS_EXCEPTION;
+  }
+  JSValue options = argv[2];
+  JSValue value = JS_GetPropertyStr(ctx, options, "stdinMode");
+  double in_mode = 0;
+  JS_ToFloat64(ctx, &in_mode, value);
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "stdoutMode");
+  double out_mode = 0;
+  JS_ToFloat64(ctx, &out_mode, value);
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "stderrMode");
+  double err_mode = 0;
+  JS_ToFloat64(ctx, &err_mode, value);
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "stdoutFd");
+  double out_fd = -1;
+  if (!JS_IsUndefined(value)) JS_ToFloat64(ctx, &out_fd, value);
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "stderrFd");
+  double err_fd = -1;
+  if (!JS_IsUndefined(value)) JS_ToFloat64(ctx, &err_fd, value);
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "detached");
+  bool detached = JS_ToBool(ctx, value) > 0;
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "cwd");
+  ScrStr *cwd = JS_IsString(value) ? isl_arg_str(ctx, value) : NULL;
+  JS_FreeValue(ctx, value);
+  value = JS_GetPropertyStr(ctx, options, "env");
+  bool has_env = JS_IsObject(value);
+  ScrArr *env_pairs = has_env ? isl_child_env_array(ctx, value) : NULL;
+  JS_FreeValue(ctx, value);
+  if (has_env && !env_pairs) {
+    scr_str_release(cmd);
+    scr_arr_release(args);
+    scr_str_release(cwd);
+    return JS_EXCEPTION;
+  }
+  ScrChild *child = scr_spawn_opts(cmd, args, in_mode, out_mode, err_mode,
+                                    out_fd, err_fd, detached, has_env,
+                                    env_pairs, cwd);
+  scr_str_release(cmd);
+  scr_arr_release(args);
+  scr_arr_release(env_pairs);
+  scr_str_release(cwd);
+  IslChildHandle *handle = malloc(sizeof *handle);
+  if (!handle) {
+    fprintf(stderr, "scriptc: out of memory\n");
+    abort();
+  }
+  handle->child = child;
+  JSValue result = JS_NewObjectClass(ctx, isl_child_class_id);
+  if (JS_IsException(result)) {
+    scr_child_release(child);
+    free(handle);
+    return result;
+  }
+  JS_SetOpaque(result, handle);
+  return result;
+}
+
+static JSValue isl_host_child_on(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  IslChildHandle *h = JS_GetOpaque2(ctx, argv[0], isl_child_class_id);
+  if (!h) return JS_EXCEPTION;
+  const char *event = JS_ToCString(ctx, argv[1]);
+  if (!event) return JS_EXCEPTION;
+  if (strcmp(event, "exit") == 0) {
+    scr_child_on_exit(h->child, isl_child_callback(ctx, argv[2], (void *)isl_child_exit_cb), isl_child_exit_cb);
+  } else if (strcmp(event, "error") == 0) {
+    scr_child_on_error(h->child, isl_child_callback(ctx, argv[2], (void *)isl_child_error_cb), isl_child_error_cb);
+  } else {
+    bool is_out = strncmp(event, "stdout", 6) == 0;
+    ScrChildStream *stream = is_out ? scr_child_stdout(h->child) : scr_child_stderr(h->child);
+    if (stream) {
+      if (strstr(event, "Data")) {
+        scr_child_stream_on_data(stream, isl_child_callback(ctx, argv[2], (void *)isl_child_data_cb), isl_child_data_cb, false);
+      } else {
+        scr_child_stream_on_end(stream, isl_child_callback(ctx, argv[2], (void *)isl_child_end_cb), false);
+      }
+      scr_child_stream_release(stream);
+    }
+  }
+  JS_FreeCString(ctx, event);
+  return JS_UNDEFINED;
+}
+
+static JSValue isl_host_child_get(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  IslChildHandle *h = JS_GetOpaque2(ctx, argv[0], isl_child_class_id);
+  if (!h) return JS_EXCEPTION;
+  const char *prop = JS_ToCString(ctx, argv[1]);
+  if (!prop) return JS_EXCEPTION;
+  JSValue result = JS_UNDEFINED;
+  if (strcmp(prop, "pid") == 0) {
+    if (scr_child_has_pid(h->child)) result = JS_NewFloat64(ctx, scr_child_pid(h->child));
+  } else if (strcmp(prop, "exitCode") == 0) {
+    result = scr_child_has_exit_code(h->child) ? JS_NewFloat64(ctx, scr_child_exit_code(h->child)) : JS_NULL;
+  } else if (strcmp(prop, "killed") == 0) {
+    result = JS_NewBool(ctx, scr_child_killed(h->child));
+  }
+  JS_FreeCString(ctx, prop);
+  return result;
+}
+
+static JSValue isl_host_child_kill(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  IslChildHandle *h = JS_GetOpaque2(ctx, argv[0], isl_child_class_id);
+  if (!h) return JS_EXCEPTION;
+  bool ok = false;
+  if (JS_IsNumber(argv[1])) {
+    double signal = 0;
+    if (JS_ToFloat64(ctx, &signal, argv[1])) return JS_EXCEPTION;
+    ok = scr_child_kill_num(h->child, signal);
+  } else {
+    ScrStr *signal = isl_arg_str(ctx, argv[1]);
+    if (!signal) return JS_EXCEPTION;
+    ok = scr_child_kill(h->child, signal);
+    scr_str_release(signal);
+  }
+  if (scr_exc_pending()) return isl_throw_pending(ctx);
+  return JS_NewBool(ctx, ok);
+}
+
+static JSValue isl_host_child_unref(JSContext *ctx, JSValueConst this_val, int argc,
+                                    JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  IslChildHandle *h = JS_GetOpaque2(ctx, argv[0], isl_child_class_id);
+  if (!h) return JS_EXCEPTION;
+  scr_child_unref(h->child);
+  return JS_UNDEFINED;
+}
+
+static void isl_register_child_classes(void) {
+  JS_NewClassID(isl_rt, &isl_file_handle_class_id);
+  JS_NewClass(isl_rt, isl_file_handle_class_id, &isl_file_handle_class);
+  JS_NewClassID(isl_rt, &isl_child_class_id);
+  JS_NewClass(isl_rt, isl_child_class_id, &isl_child_class);
 }
 
 /* The path bridge: both of Node's implementations live in scr_path.c
@@ -4336,8 +4750,16 @@ static const char isl_modules_bootstrap[] =
     "    read: () => {\n"
     "      throw new Error(\"fs.read is not available in the scriptc island (whole-file reads/writes only)\");\n"
     "    },\n"
-    "    open: () => {\n"
-    "      throw new Error(\"fs.open is not available in the scriptc island (whole-file reads/writes only)\");\n"
+    "    open: (p, flags, mode, cb) => {\n"
+    "      if (typeof mode === 'function') { cb = mode; mode = undefined; }\n"
+    "      if (typeof cb !== 'function') {\n"
+    "        const e = new TypeError('The \"cb\" argument must be of type function. Received ' + (cb === undefined ? 'undefined' : 'type ' + typeof cb));\n"
+    "        e.code = 'ERR_INVALID_ARG_TYPE';\n"
+    "        throw e;\n"
+    "      }\n"
+    "      try { const fd = call(\"open\", pathOf(p), String(flags)); env.nextTick(() => cb(null, fd)); }\n"
+    "      catch (err) { env.nextTick(() => cb(err)); }\n"
+    "      void mode;\n"
     "    },\n"
     "    unwatchFile: () => undefined,\n"
     "  };\n"
@@ -4360,13 +4782,26 @@ static const char isl_modules_bootstrap[] =
     "    rename: promisify(renameSync),\n"
     "    readlink: promisify(readlinkSync),\n"
     "    constants,\n"
-    "    open: () => {\n"
-    "      return Promise.reject(new Error(\"fs.promises.open is not available in the scriptc island (whole-file reads/writes only)\"));\n"
-    "    },\n"
+    "    open: (p, flags, mode) => Promise.resolve().then(() => {\n"
+    "      const handle = call(\"openHandle\", pathOf(p), String(flags));\n"
+    "      let closed = false;\n"
+    "      return {\n"
+    "        get fd() { return undefined; },\n"
+    "        read: (buffer, offset, length, position) => Promise.resolve().then(() => {\n"
+    "          if (closed) throw new Error('file closed');\n"
+    "          const bytesRead = env.fsHandle(\"read\", handle, dataToU8(buffer), Number(offset), Number(length), position !== undefined && position !== null ? 1 : 0, Number(position || 0));\n"
+    "          return { bytesRead, buffer };\n"
+    "        }),\n"
+    "        close: () => Promise.resolve().then(() => {\n"
+    "          if (!closed) { env.fsHandle(\"close\", handle); closed = true; }\n"
+    "        }),\n"
+    "      };\n"
+    "      void mode;\n"
+    "    }),\n"
     "  };\n"
     "  return fs;\n"
     "}\n"
-    "    const fs = makeFs({ fs: (...a) => host.fs(...a), fsConstants: () => host.fsConstants(), rename: (a, b) => host.rename(a, b), Buffer: builtins.buffer().Buffer, Readable: builtins.stream().Readable, Writable: builtins.stream().Writable, nextTick: (fn) => queueMicrotask(fn) });\n"
+    "    const fs = makeFs({ fs: (...a) => host.fs(...a), fsHandle: (...a) => host.fsHandle(...a), fsConstants: () => host.fsConstants(), rename: (a, b) => host.rename(a, b), Buffer: builtins.buffer().Buffer, Readable: builtins.stream().Readable, Writable: builtins.stream().Writable, nextTick: (fn) => queueMicrotask(fn) });\n"
     "    fs.default = fs;\n"
     "    return fs;\n"
     "  });\n"
@@ -8163,11 +8598,62 @@ static const char isl_modules_bootstrap[] =
     "    return t;\n"
     "  });\n"
     "  builtins.child_process = memo(() => {\n"
-    "    const die = (name) => () => {\n"
-    "      throw new Error('child_process.' + name + ' is not available in the scriptc island');\n"
+    "    const EventEmitter = builtins.events();\n"
+    "    const { Readable } = builtins.stream();\n"
+    "    const stdioMode = (slot, index) => {\n"
+    "      const value = Array.isArray(slot) ? slot[index] : slot;\n"
+    "      if (typeof value === 'number') return { mode: 2, fd: value };\n"
+    "      if (value === 'inherit') return { mode: 1, fd: -1 };\n"
+    "      if (value === 'pipe' && index > 0) return { mode: 3, fd: -1 };\n"
+    "      return { mode: 0, fd: -1 };\n"
     "    };\n"
-    "    const cp = {};\n"
-    "    for (const n of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) cp[n] = die(n);\n"
+    "    const spawn = (command, args, options) => {\n"
+    "      if (!Array.isArray(args)) { options = args; args = []; }\n"
+    "      const opts = options || {};\n"
+    "      const stdio = opts.stdio === undefined ? 'pipe' : opts.stdio;\n"
+    "      const stdin = stdioMode(stdio, 0);\n"
+    "      const stdout = stdioMode(stdio, 1);\n"
+    "      const stderr = stdioMode(stdio, 2);\n"
+    "      const handle = host.childSpawn(String(command), args.map(String), {\n"
+    "        stdinMode: stdin.mode, stdoutMode: stdout.mode, stderrMode: stderr.mode,\n"
+    "        stdoutFd: stdout.fd, stderrFd: stderr.fd, detached: !!opts.detached,\n"
+    "        cwd: opts.cwd, env: opts.env,\n"
+    "      });\n"
+    "      const child = new EventEmitter();\n"
+    "      child.stdin = null;\n"
+    "      child.stdout = stdout.mode === 3 ? new Readable({ read() {} }) : null;\n"
+    "      child.stderr = stderr.mode === 3 ? new Readable({ read() {} }) : null;\n"
+    "      Object.defineProperties(child, {\n"
+    "        pid: { enumerable: true, get: () => host.childGet(handle, 'pid') },\n"
+    "        exitCode: { enumerable: true, get: () => host.childGet(handle, 'exitCode') },\n"
+    "        killed: { enumerable: true, get: () => host.childGet(handle, 'killed') },\n"
+    "      });\n"
+    "      child.kill = (signal) => host.childKill(handle, signal === undefined ? 'SIGTERM' : signal);\n"
+    "      child.unref = () => { host.childUnref(handle); return child; };\n"
+    "      if (child.stdout) {\n"
+    "        host.childOn(handle, 'stdoutData', (chunk) => child.stdout.push(Buffer.from(chunk)));\n"
+    "        host.childOn(handle, 'stdoutEnd', () => child.stdout.push(null));\n"
+    "      }\n"
+    "      if (child.stderr) {\n"
+    "        host.childOn(handle, 'stderrData', (chunk) => child.stderr.push(Buffer.from(chunk)));\n"
+    "        host.childOn(handle, 'stderrEnd', () => child.stderr.push(null));\n"
+    "      }\n"
+    "      host.childOn(handle, 'error', (message) => {\n"
+    "        const err = new Error(message);\n"
+    "        const match = / (E[A-Z0-9]+)$/.exec(message);\n"
+    "        if (match) err.code = match[1];\n"
+    "        child.emit('error', err);\n"
+    "        queueMicrotask(() => child.emit('close', null, null));\n"
+    "      });\n"
+    "      host.childOn(handle, 'exit', (code, signal) => {\n"
+    "        child.emit('exit', code, signal);\n"
+    "        queueMicrotask(() => child.emit('close', code, signal));\n"
+    "      });\n"
+    "      return child;\n"
+    "    };\n"
+    "    const die = (name) => () => { throw new Error('child_process.' + name + ' is not available in the scriptc island'); };\n"
+    "    const cp = { spawn };\n"
+    "    for (const n of ['spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) cp[n] = die(n);\n"
     "    cp.default = cp;\n"
     "    return cp;\n"
     "  });\n"
@@ -9561,7 +10047,13 @@ static void isl_modules_boot(void) {
   JS_SetPropertyStr(isl_ctx, host, "digest", JS_NewCFunction(isl_ctx, isl_host_digest, "digest", 2));
   JS_SetPropertyStr(isl_ctx, host, "hmac", JS_NewCFunction(isl_ctx, isl_host_hmac, "hmac", 3));
   JS_SetPropertyStr(isl_ctx, host, "fs", JS_NewCFunction(isl_ctx, isl_host_fs, "fs", 4));
+  JS_SetPropertyStr(isl_ctx, host, "fsHandle", JS_NewCFunction(isl_ctx, isl_host_fs_handle, "fsHandle", 7));
   JS_SetPropertyStr(isl_ctx, host, "fsConstants", JS_NewCFunction(isl_ctx, isl_host_fs_constants, "fsConstants", 0));
+  JS_SetPropertyStr(isl_ctx, host, "childSpawn", JS_NewCFunction(isl_ctx, isl_host_child_spawn, "childSpawn", 3));
+  JS_SetPropertyStr(isl_ctx, host, "childOn", JS_NewCFunction(isl_ctx, isl_host_child_on, "childOn", 3));
+  JS_SetPropertyStr(isl_ctx, host, "childGet", JS_NewCFunction(isl_ctx, isl_host_child_get, "childGet", 2));
+  JS_SetPropertyStr(isl_ctx, host, "childKill", JS_NewCFunction(isl_ctx, isl_host_child_kill, "childKill", 2));
+  JS_SetPropertyStr(isl_ctx, host, "childUnref", JS_NewCFunction(isl_ctx, isl_host_child_unref, "childUnref", 1));
   JS_SetPropertyStr(isl_ctx, host, "path", JS_NewCFunction(isl_ctx, isl_host_path, "path", 4));
   JS_SetPropertyStr(isl_ctx, host, "urlToPath", JS_NewCFunction(isl_ctx, isl_host_url_to_path, "urlToPath", 1));
   JS_SetPropertyStr(isl_ctx, host, "urlFromPath", JS_NewCFunction(isl_ctx, isl_host_url_from_path, "urlFromPath", 1));
