@@ -5374,7 +5374,7 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
             "SC1090",
             expr,
             `Set elements of type '${L.checker.typeToString(targs[0])}' ` +
-              `(Set elements must be string or number — Map's key kinds — or a server handle, which stores under reference identity)`,
+              `(Set elements must be string or number, a supported identity handle, or 'any' under --dynamic)`,
           );
         }
         L.badType(expr, tsType);

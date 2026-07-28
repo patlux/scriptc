@@ -1348,9 +1348,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const rcAdapters = elemAcc === "ref" ? vAdapters(e.type.elem) : null;
         const s = E.newTemp(
           e.type,
-          rcAdapters
-            ? `scr_set_new_ref(&${rcAdapters.retain}, &${rcAdapters.release})`
-            : `scr_map_new(${mapKeyKindC(e.type.elem)}, SCR_MAP_VAL_F64, NULL, NULL, NULL)`,
+          e.type.elem.kind === "jsval"
+            ? "scr_set_new_jsval()"
+            : rcAdapters
+              ? `scr_set_new_ref(&${rcAdapters.retain}, &${rcAdapters.release})`
+              : `scr_map_new(${mapKeyKindC(e.type.elem)}, SCR_MAP_VAL_F64, NULL, NULL, NULL)`,
         );
         // Seeded construction (`new Set(values)`): one borrowed T[] whose
         // elements add() in order — the runtime helper walks the array

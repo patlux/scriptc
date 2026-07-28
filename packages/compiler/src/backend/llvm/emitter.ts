@@ -8972,7 +8972,10 @@ class LlEmitter {
     const B = this.B;
     const kAcc = mapKeyAccess(e.type.elem);
     const s = B.tmp();
-    if (kAcc === "ref") {
+    if (e.type.elem.kind === "jsval") {
+      this.declare(`declare ptr @scr_set_new_jsval()`);
+      B.line(`${s} = call ptr @scr_set_new_jsval()`);
+    } else if (kAcc === "ref") {
       const rc = vAdapters(this, e.type.elem);
       this.declare(`declare ptr @scr_set_new_ref(ptr, ptr)`);
       B.line(`${s} = call ptr @scr_set_new_ref(ptr ${rc.retain}, ptr ${rc.release})`);

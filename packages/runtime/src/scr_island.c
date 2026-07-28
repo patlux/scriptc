@@ -1077,6 +1077,29 @@ void scr_jsval_release(ScrJsval *v) {
 void *scr_jsval_retain_v(void *v) { return scr_jsval_retain(v); }
 void scr_jsval_release_v(void *v) { scr_jsval_release(v); }
 
+/* A Set<any> stores island cells but keys by the underlying ENGINE value,
+ * not by cell address: separate property reads of the same object mint
+ * separate cells. SameValueZero is exact for primitives and references.
+ * A constant hash is deliberately collision-heavy but honest; Set<any> is
+ * an opt-in dynamic surface and correctness takes precedence over a wider
+ * engine-identity hashing API. */
+static size_t isl_jsval_set_hash(const void *v) {
+  (void)v;
+  return 0;
+}
+
+static bool isl_jsval_set_eq(const void *a, const void *b) {
+  const ScrJsval *av = a;
+  const ScrJsval *bv = b;
+  isl_entry(ISL_ENTRY_VALUE);
+  return JS_IsSameValueZero(isl_ctx, av->v, bv->v);
+}
+
+ScrMap *scr_set_new_jsval(void) {
+  return scr_set_new_ref_custom(scr_jsval_retain_v, scr_jsval_release_v,
+                                isl_jsval_set_hash, isl_jsval_set_eq);
+}
+
 /* ── marshal in ─────────────────────────────────────────────────────── */
 
 ScrJsval *scr_jsval_from_f64(double v) {

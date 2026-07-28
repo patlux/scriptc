@@ -81,11 +81,28 @@ static void *scr_map_slot_to_ptr(uint64_t s) { return (void *)(uintptr_t)s; }
 /* Stored keys are pre-normalized, so bit equality IS SameValueZero for f64
  * keys (probe keys normalize through the same function). */
 static bool scr_map_key_eq(const ScrMap *m, uint64_t stored, uint64_t probe) {
-  /* f64 keys are pre-normalized and REF keys are pointers, so bit equality
-   * IS the honest compare for both (SameValueZero; reference identity). */
+  /* f64 keys are pre-normalized; ordinary REF keys use pointer identity.
+   * Island-value Sets override REF equality with engine SameValueZero. */
+  if (m->key_kind == SCR_MAP_KEY_REF && m->key_eq) {
+    return m->key_eq(scr_map_slot_to_ptr(stored), scr_map_slot_to_ptr(probe));
+  }
   if (m->key_kind != SCR_MAP_KEY_STR) return stored == probe;
   return scr_str_eq((ScrStr *)scr_map_slot_to_ptr(stored),
                      (ScrStr *)scr_map_slot_to_ptr(probe));
+}
+
+static size_t scr_map_hash_ref(const ScrMap *m, const void *key) {
+  if (m->key_hash) return m->key_hash(key);
+  uint64_t k = scr_map_slot_from_ptr((void *)key);
+  return scr_map_fnv1a((const unsigned char *)&k, 8);
+}
+
+static size_t scr_map_hash_stored(const ScrMap *m, uint64_t key) {
+  if (m->key_kind == SCR_MAP_KEY_STR) {
+    return scr_map_hash_str((ScrStr *)scr_map_slot_to_ptr(key));
+  }
+  if (m->key_kind == SCR_MAP_KEY_REF) return scr_map_hash_ref(m, scr_map_slot_to_ptr(key));
+  return scr_map_fnv1a((const unsigned char *)&key, 8);
 }
 
 /* ── lookup ────────────────────────────────────────────────────────────
@@ -113,9 +130,7 @@ static void scr_map_rebuild_buckets(ScrMap *m, size_t nbuckets) {
   size_t mask = nbuckets - 1;
   for (size_t e = 0; e < m->nentries; e++) {
     if (!m->entries[e].live) continue;
-    uint64_t hash = m->key_kind != SCR_MAP_KEY_STR
-                        ? scr_map_fnv1a((const unsigned char *)&m->entries[e].key, 8)
-                        : scr_map_hash_str((ScrStr *)scr_map_slot_to_ptr(m->entries[e].key));
+    uint64_t hash = scr_map_hash_stored(m, m->entries[e].key);
     size_t i = hash & mask;
     while (buckets[i] != SCR_MAP_EMPTY) i = (i + 1) & mask;
     buckets[i] = e;
@@ -312,7 +327,7 @@ bool scr_map_delete_str(ScrMap *m, const ScrStr *key) {
  * SCR_MAP_KEY_REF note). Probes never retain; storage does. */
 static size_t scr_map_find_ref(const ScrMap *m, const void *key) {
   uint64_t k = scr_map_slot_from_ptr((void *)key);
-  return scr_map_find(m, scr_map_fnv1a((const unsigned char *)&k, 8), k);
+  return scr_map_find(m, scr_map_hash_ref(m, key), k);
 }
 
 bool scr_map_has_ref(const ScrMap *m, const void *key) {
@@ -389,14 +404,22 @@ void scr_map_set_str_ref(ScrMap *m, ScrStr *key, void *v) {
 
 void scr_map_set_ref_f64(ScrMap *m, void *key, double v) {
   uint64_t k = scr_map_slot_from_ptr(key);
-  scr_map_set(m, scr_map_fnv1a((const unsigned char *)&k, 8), k, scr_map_slot_from_f64(v));
+  scr_map_set(m, scr_map_hash_ref(m, key), k, scr_map_slot_from_f64(v));
 }
 
-ScrMap *scr_set_new_ref(void *(*elem_retain)(void *), void (*elem_release)(void *)) {
+ScrMap *scr_set_new_ref_custom(void *(*elem_retain)(void *), void (*elem_release)(void *),
+                               size_t (*elem_hash)(const void *),
+                               bool (*elem_eq)(const void *, const void *)) {
   ScrMap *m = scr_map_new(SCR_MAP_KEY_REF, SCR_MAP_VAL_F64, NULL, NULL, NULL);
   m->key_retain = elem_retain;
   m->key_release = elem_release;
+  m->key_hash = elem_hash;
+  m->key_eq = elem_eq;
   return m;
+}
+
+ScrMap *scr_set_new_ref(void *(*elem_retain)(void *), void (*elem_release)(void *)) {
+  return scr_set_new_ref_custom(elem_retain, elem_release, NULL, NULL);
 }
 
 /* ── get ───────────────────────────────────────────────────────────────── */

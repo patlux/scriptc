@@ -390,9 +390,12 @@ export function isSupportedMapKey(t: IrType): boolean {
  * the child precedent's story. Symbols are identity values by DESIGN —
  * SameValueZero on a symbol IS pointer identity, so a Set of symbols (the
  * sentinel-registry idiom) is the same honest hashed storage with no
- * cycle risk at all (symbols hold only strings). */
+ * cycle risk at all (symbols hold only strings). Checked-dynamic `any`
+ * maps to jsval under --dynamic; those cells use an engine-SameValueZero
+ * Set specialization, because cell-pointer identity would be incorrect
+ * when two property reads wrap the same engine object independently. */
 export function isSupportedSetElem(t: IrType): boolean {
-  return isSupportedMapKey(t) || t.kind === "netServer" || t.kind === "symbol";
+  return isSupportedMapKey(t) || t.kind === "netServer" || t.kind === "symbol" || t.kind === "jsval";
 }
 
 /** The Map VALUE fence: scalars plus every refcounted kind EXCEPT

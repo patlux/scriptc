@@ -3322,7 +3322,7 @@ export function describeComponentBlocker(widened: ts.Type, ctx: TypeMapperCtx): 
         return `the ${container} shape is supported, but '${text(arg)}' values have no Map slot yet (functions, promises, and nested Maps stay out)`;
       }
       if ((container === "Set" || container === "ReadonlySet") && !isSupportedSetElem(mapped)) {
-        return `the ${container} shape is supported, but elements are limited to numbers and strings — '${text(arg)}' is outside that domain`;
+        return `the ${container} shape is supported, but elements are limited to numbers, strings, supported identity handles, and 'any' under --dynamic — '${text(arg)}' is outside that domain`;
       }
     }
     // Every argument passed the per-slot checks and the type still failed:

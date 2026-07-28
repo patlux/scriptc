@@ -1000,9 +1000,13 @@ typedef struct ScrMap {
   void *(*val_retain)(void *);
   void (*val_release)(void *);
   ScrTraceFn val_trace;
-  /* SCR_MAP_KEY_REF only (scr_set_new_ref); NULL otherwise. */
+  /* SCR_MAP_KEY_REF only (scr_set_new_ref); NULL otherwise. Equality/hash
+   * default to pointer identity; island-value Sets override them with the
+   * engine's SameValueZero and a collision-safe constant hash. */
   void *(*key_retain)(void *);
   void (*key_release)(void *);
+  size_t (*key_hash)(const void *);
+  bool (*key_eq)(const void *, const void *);
   size_t nentries; /* dense entries used, tombstones included */
   size_t nlive;    /* live entries (Map.size) */
   size_t ecap;     /* entries capacity */
@@ -1088,6 +1092,9 @@ ScrArr *scr_set_to_arr_ref(const ScrMap *s);
  * pointers under identity hashing (see SCR_MAP_KEY_REF above). The element
  * type's `_v` adapters arrive once, the scr_arr_new_ref technique. */
 ScrMap *scr_set_new_ref(void *(*elem_retain)(void *), void (*elem_release)(void *));
+ScrMap *scr_set_new_ref_custom(void *(*elem_retain)(void *), void (*elem_release)(void *),
+                               size_t (*elem_hash)(const void *),
+                               bool (*elem_eq)(const void *, const void *));
 
 /* The live STRING keys of a map in JS OWN-KEY ORDER (Object.keys/values/
  * entries over an index-signature record's overflow): canonical array
@@ -3985,6 +3992,7 @@ ScrJsval *scr_jsval_retain(ScrJsval *v);
 void scr_jsval_release(ScrJsval *v);
 void *scr_jsval_retain_v(void *v);
 void scr_jsval_release_v(void *v);
+ScrMap *scr_set_new_jsval(void); /* SameValueZero over engine values */
 
 /* Binary operator codes for scr_jsval_binop / scr_jsval_cmp. The JS
  * semantics (ToPrimitive, coercion) come from prelude helper closures
