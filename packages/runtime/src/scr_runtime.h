@@ -896,7 +896,7 @@ ScrStr *scr_str_raw(ScrArr *raw, ScrArr *subs);
 typedef struct ScrRegex {
   size_t rc;      /* SIZE_MAX = immortal (every regex literal) */
   ScrStr *source; /* pattern text between the slashes */
-  ScrStr *flags;  /* flags text, source order (alphabet fenced to gimsuy) */
+  ScrStr *flags;  /* flags text, source order (alphabet fenced to gimsuvy) */
   uint8_t *bc;    /* lazily compiled libregexp bytecode; NULL until first use */
 } ScrRegex;
 

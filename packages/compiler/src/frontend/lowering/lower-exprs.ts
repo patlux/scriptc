@@ -8987,8 +8987,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
 
 /** A regex literal `/ab+c/gi` → regexLit (interned per (pattern, flags)
    * by the backend). The TS parser has already syntax-checked the literal;
-   * what remains here is the flag-alphabet fence (d and v are
-   * declared-valid TS flags outside this slice). Named capture groups
+   * what remains here is the flag-alphabet fence (`d` is outside this
+   * slice; vendored libregexp supplies unicode-set `v`). Named capture groups
    * `(?<name>...)` and `\k<name>` backreferences compile — libregexp
    * executes them natively, replace templates resolve `$<name>` at
    * runtime, and `.groups` reads desugar at their access sites
@@ -9001,15 +9001,13 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     const pattern = text.slice(1, lastSlash);
     const flags = text.slice(lastSlash + 1);
     for (const f of flags) {
-      if (!"gimsuy".includes(f)) {
+      if (!"gimsuvy".includes(f)) {
         L.unsupported(
           "SC1120",
           expr,
           f === "d"
             ? "the regex 'd' flag (match indices)"
-            : f === "v"
-              ? "the regex 'v' flag (unicode sets)"
-              : `the regex '${f}' flag`,
+            : `the regex '${f}' flag`,
         );
       }
     }

@@ -21,31 +21,22 @@ regex.ts:9:17 - error SC1120: the regex 'd' flag (match indices) is not supporte
    8 | const y = /ab/y.test("abab");
    9 | const indices = /cat/d;
      |                 ^~~~~~
-  10 | const sets = /[\p{L}]/v;
+  10 | const asValue = /x/.test;
 
-  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $<name> templates, \k<name>), .source/.flags, and string replace/replaceAll/split with string replacement templates
+  hint: supported: literal regexes with the g/i/m/s/u/v/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $<name> templates, \k<name>), .source/.flags, and string replace/replaceAll/split with string replacement templates
 
-regex.ts:10:14 - error SC1120: the regex 'v' flag (unicode sets) is not supported yet
+regex.ts:10:17 - error SC1090: regex methods as values (call 'test' directly) are not supported yet
 
    9 | const indices = /cat/d;
-  10 | const sets = /[\p{L}]/v;
-     |              ^~~~~~~~~~
-  11 | const asValue = /x/.test;
-
-  hint: supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $<name> templates, \k<name>), .source/.flags, and string replace/replaceAll/split with string replacement templates
-
-regex.ts:11:17 - error SC1090: regex methods as values (call 'test' directly) are not supported yet
-
-  10 | const sets = /[\p{L}]/v;
-  11 | const asValue = /x/.test;
+  10 | const asValue = /x/.test;
      |                 ^~~~~~~~
-  12 | const maybe: RegExp | undefined = /a/;
+  11 | const maybe: RegExp | undefined = /a/;
 
-regex.ts:15:22 - error SC2020: 'RegExpExecArray.groups' is part of the standard library types but has no scriptc lowering yet
+regex.ts:14:22 - error SC2020: 'RegExpExecArray.groups' is part of the standard library types but has no scriptc lowering yet
 
-  14 |   const m = re.exec("2024-07");
-  15 |   if (m) console.log(m.groups);
+  13 |   const m = re.exec("2024-07");
+  14 |   if (m) console.log(m.groups);
      |                      ^~~~~~~~
-  16 | }
+  15 | }
 
   hint: '.groups' lowers when the match's regex is STATICALLY known — a regex literal, or a const initialized with one (the group-name table is built at compile time) — and the read is not an optional-chain step: narrow the match instead (if (m) { m.groups } or m!.groups)

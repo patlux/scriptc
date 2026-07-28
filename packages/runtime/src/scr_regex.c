@@ -106,7 +106,7 @@ static void scr_note_compiled(ScrRegex *re) {
 }
 
 /* Flags string → LRE_FLAG_* mask. The frontend fences the flag alphabet to
- * g/i/m/s/u/y, so anything else here is a compiler bug. */
+ * g/i/m/s/u/v/y, so anything else here is a compiler bug. */
 static int scr_lre_flags(const ScrStr *flags) {
   int mask = 0;
   for (size_t i = 0; i < flags->len; i++) {
@@ -116,6 +116,7 @@ static int scr_lre_flags(const ScrStr *flags) {
       case 'm': mask |= LRE_FLAG_MULTILINE; break;
       case 's': mask |= LRE_FLAG_DOTALL; break;
       case 'u': mask |= LRE_FLAG_UNICODE; break;
+      case 'v': mask |= LRE_FLAG_UNICODE_SETS; break;
       case 'y': mask |= LRE_FLAG_STICKY; break;
       default:
         scr_trap_fmt("scriptc: internal error: unexpected regex flag '%c'\n",
@@ -180,7 +181,7 @@ static uint8_t *scr_regex_bc(ScrRegex *re) {
   const char *pat = re->source->data;
   size_t pat_len = re->source->len;
   char *cesu = NULL;
-  if (!(flags & LRE_FLAG_UNICODE)) {
+  if (!(flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS))) {
     cesu = scr_pattern_cesu8(re->source, &pat_len);
     if (cesu) pat = cesu;
   }
@@ -935,7 +936,7 @@ void scr_assert_shape_re(int key, ScrRegex *re) {
 ScrRegex *scr_regex_new(ScrStr *pattern, ScrStr *flags) {
   for (size_t i = 0; i < flags->len; i++) {
     switch (flags->data[i]) {
-    case 'g': case 'i': case 'm': case 's': case 'u': case 'y':
+    case 'g': case 'i': case 'm': case 's': case 'u': case 'v': case 'y':
       break;
     default: {
       char msg[80];
@@ -960,7 +961,7 @@ ScrRegex *scr_regex_new(ScrStr *pattern, ScrStr *flags) {
   const char *pat = re->source->data;
   size_t pat_len = re->source->len;
   char *cesu = NULL;
-  if (!(lre_flags & LRE_FLAG_UNICODE)) {
+  if (!(lre_flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS))) {
     cesu = scr_pattern_cesu8(re->source, &pat_len);
     if (cesu) pat = cesu;
   }

@@ -57,6 +57,7 @@ RE(re_empty_gu, "(?:)", "gu");
 RE(re_bstar, "b*", "");
 RE(re_b_y, "b", "y");
 RE(re_letter_u, "\\p{L}", "u");
+RE(re_consonant_v, "[[a-z]--[aeiou]]", "v");
 RE(re_caret_gm, "^", "gm");
 RE(re_adotb_s, "a.b", "s");
 RE(re_astral, "\xF0\x9F\x98\x80", "");        /* non-/u astral: CESU-8 path */
@@ -85,6 +86,10 @@ static void test_test(void) {
   check(!scr_regex_test(&re_abc_i, s2), "test: /ab+c/i misses 'ab'");
   ScrStr *accent = S("\xC3\xA9"); /* é */
   check(scr_regex_test(&re_letter_u, accent), "test: /\\p{L}/u matches é (unicode tables linked)");
+  ScrStr *b = S("b");
+  ScrStr *a = S("a");
+  check(scr_regex_test(&re_consonant_v, b), "test: /v unicode-set subtraction matches consonant");
+  check(!scr_regex_test(&re_consonant_v, a), "test: /v unicode-set subtraction excludes vowel");
   ScrStr *newline = S("a\nb");
   check(scr_regex_test(&re_adotb_s, newline), "test: /a.b/s crosses the newline");
   ScrStr *emoji = S("\xF0\x9F\x98\x80");
@@ -93,6 +98,8 @@ static void test_test(void) {
   scr_str_release(s1);
   scr_str_release(s2);
   scr_str_release(accent);
+  scr_str_release(b);
+  scr_str_release(a);
   scr_str_release(newline);
   scr_str_release(emoji);
 }
@@ -101,6 +108,7 @@ static void test_source_flags(void) {
   expect_str(scr_regex_source(&re_abc_i), "ab+c", "source readback");
   expect_str(scr_regex_flags(&re_abc_i), "i", "flags readback");
   expect_str(scr_regex_flags(&re_empty_gu), "gu", "flags keep source order");
+  expect_str(scr_regex_flags(&re_consonant_v), "v", "unicode-sets flag readback");
 }
 
 static void test_replace(void) {
