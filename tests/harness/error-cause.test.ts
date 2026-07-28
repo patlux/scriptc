@@ -69,15 +69,18 @@ async function compileAndCompare(name: string, source: string, backend?: "c"): P
 }
 
 const source = `const reason = { code: 7, text: "root" };
+const rootError = new TypeError("root error");
 const absent = new Error("absent");
 const plain = new Error("plain", { cause: reason });
 const typed = new TypeError("typed", { cause: undefined });
 const ranged = new RangeError("range", { cause: null });
 const syntax = new SyntaxError("syntax", { cause: "bad token" });
+const nested = new Error("nested", { cause: rootError });
 console.log("cause" in absent, absent.cause === undefined);
 console.log("cause" in plain, (plain.cause as { code: number }).code, plain.message);
 console.log("cause" in typed, typed.cause === undefined, typed.name);
 console.log(ranged.cause === null, syntax.cause, ranged instanceof Error);
+if (nested.cause instanceof Error) console.log(nested.cause === rootError, nested.cause.message, nested.cause instanceof TypeError);
 `;
 
 describe(`Error cause options${sanitize ? " (sanitized)" : ""}`, () => {

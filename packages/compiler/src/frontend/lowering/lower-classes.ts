@@ -4976,7 +4976,14 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
             );
           }
           const rawCause = L.lowerExpr(causeNode);
-          const cause = L.coerceInto(causeNode, rawCause, DYN);
+          const cause = rawCause.type.kind === "object" && L.errorHierarchyClassOf(rawCause.type.className)
+            ? {
+                kind: "dynFrom" as const,
+                value: L.upcastTo(rawCause, "%Error"),
+                type: DYN,
+                loc: rawCause.loc,
+              }
+            : L.coerceInto(causeNode, rawCause, DYN);
           return {
             kind: "libCall",
             fn: "error.newCause",
