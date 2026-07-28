@@ -1578,6 +1578,7 @@ static void web_timerfn_release(void *p) {
  * callback's throw. */
 static void web_timer_fire_cb(ScrClosure *env) {
   WebTimerFn *h = scr_box_get_ref(env->caps[0]); /* +1 */
+  scr_island_host_enter();
   JSValue r = JS_Call(h->ctx, h->fn, JS_UNDEFINED, 0, NULL);
   if (JS_IsException(r)) {
     scr_island_bridge_exception();
@@ -1672,6 +1673,7 @@ bool scr_island_timers_fire_due(void) {
       link = &(*link)->next;
     }
     if (!due) break;
+    scr_island_host_enter();
     JSValue r = JS_Call(due->ctx, due->fn, JS_UNDEFINED, 0, NULL);
     if (JS_IsException(r)) {
       JSValue e = JS_GetException(due->ctx);
