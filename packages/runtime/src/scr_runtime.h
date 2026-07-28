@@ -3800,11 +3800,11 @@ long scr_promise_live_count(void);
  * reentrant from engine callbacks.
  */
 #ifdef SCR_DYNAMIC
-/* Opt-in runtime-path tracing. Every dynamic executable calls this so an
- * island-free run can report zero QuickJS initialization/entry counts. Fully
- * static executables omit the call and preserve island dead-stripping.
- * SCRIPTC_RUNTIME_TRACE must name an absolute output path; invalid/unwritable
- * paths disable or drop the trace without changing output or exit status. */
+/* Opt-in runtime-path tracing. scr_lib_init calls this under SCR_DYNAMIC so
+ * island-free dynamic runs report zero QuickJS initialization/entry counts
+ * without changing compiler-emitted C or LLVM. Static builds do not compile
+ * this declaration or call. SCRIPTC_RUNTIME_TRACE must name an absolute path;
+ * invalid/unwritable paths never change output or exit status. */
 void scr_island_trace_install(void);
 
 /* Evaluate UTF-8 source in the island's global scope; returns

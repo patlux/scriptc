@@ -137,9 +137,8 @@ static JSContext *isl_ctx = NULL;
 
 /* ── opt-in runtime-path trace ────────────────────────────────────────
  * SCRIPTC_RUNTIME_TRACE=/absolute/path.json enables one best-effort JSON
- * snapshot at normal process teardown. The emitted main calls install only
- * for programs whose IR can reach the island, so fully static and island-
- * free dynamic binaries do not pull this translation unit in for tracing.
+ * snapshot at normal process teardown. scr_lib_init installs it for every
+ * SCR_DYNAMIC executable; static builds neither compile nor link this unit.
  * Values are fixed counters/categories only: no source, environment value,
  * request data, or caller-provided string enters the document. */
 typedef enum {

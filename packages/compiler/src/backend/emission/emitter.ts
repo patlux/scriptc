@@ -56,8 +56,8 @@ import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-isla
 import { emitFunction, emitBlock, emitStmts, emitStmt, emitTryCatch, emitSwitch, mergeBrace, emitBranchInto, emitCondition } from "./emit-stmts.js";
 import { emitExpr } from "./emit-exprs.js";
 
-export function emitModule(mod: IrModule, sourceText?: string, dynamic = false): string {
-  return new CEmitter(mod, sourceText, dynamic).emit();
+export function emitModule(mod: IrModule, sourceText?: string): string {
+  return new CEmitter(mod, sourceText).emit();
 }
 
 // Box construction moved onto CEmitter (boxNewC method): obj-kind boxes now
@@ -317,7 +317,6 @@ export class CEmitter {
   constructor(
     readonly mod: IrModule,
     sourceText?: string,
-    readonly dynamic = false,
   ) {
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
@@ -763,10 +762,6 @@ export class CEmitter {
       // both dispatch through them).
       ...streamVtStampLines(this),
       `  scr_lib_init(argc, argv);`,
-      // Every --dynamic executable can report whether it actually entered
-      // QuickJS. Static executables omit this reference and retain their
-      // island-free link surface.
-      ...(this.dynamic ? [`  scr_island_trace_install();`] : []),
       // Fetch-referencing programs register the native fetch bridge before any
       // island entry (the engine's lazy boot consults it): the ONLY
       // reference to scr_fetch.c, so fetch-free builds never compile or

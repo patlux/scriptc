@@ -138,6 +138,9 @@ void scr_lib_init(int argc, char **argv) {
   scr_lib_argc = argc;
   scr_lib_argv = argv;
   atexit(scr_lib_cleanup);
+#ifdef SCR_DYNAMIC
+  scr_island_trace_install();
+#endif
 }
 #endif /* !SCR_LIB */
 
