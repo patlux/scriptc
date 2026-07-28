@@ -50,7 +50,11 @@ async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
 /** Compile one pilot statically (no --dynamic — the whole point) with the
  * named packages opted in; cache-keyed over the program and the vendored
  * packages. */
-async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise<string> {
+async function buildStatic(
+  entry: string,
+  npmStatic: string[] | "auto",
+  backend: "c" | undefined = "c",
+): Promise<string> {
   const hash = createHash("sha256");
   const inputs = [
     entry,
@@ -62,6 +66,7 @@ async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise
   const key = hash
     .update(npmStatic === "auto" ? "auto" : npmStatic.join(","))
     .update(sanitize ? "san" : "plain")
+    .update(backend ?? "default")
     .digest("hex")
     .slice(0, 16);
   const outDir = join(cacheDir, `npm-static-${key}`);
@@ -73,8 +78,9 @@ async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise
     npmStatic,
     // Pinned: the suite pins --npm-static's FRONTEND frontier (coverage
     // numbers, fence sites); the backend lane is held fixed so those pins
-    // move only when the frontend moves.
-    backend: "c",
+    // move only when the frontend moves. Focused backend-parity tests may
+    // explicitly request the release default.
+    ...(backend === undefined ? {} : { backend }),
   });
   if (!result.ok) {
     throw new Error(
@@ -109,6 +115,18 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
+
+  test.for([undefined, "c"] as const)(
+    "node:module with literal createRequire edges stays statically admitted (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "create-require-static-cli.ts");
+      const { coverage } = analyze(entry, { npmStatic: ["create-require-static"] });
+      expect(coverage.npmStatic).toEqual([{ package: "create-require-static", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      await buildStatic(entry, ["create-require-static"], backend);
+    },
+    120_000,
+  );
 
   // Tier 1, auto mode: the eligibility heuristics pick escape-string-regexp
   // (own .d.ts, unminified, no transform markers) without naming it.

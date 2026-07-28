@@ -386,6 +386,46 @@ function requiresOf7(
   return out;
 }
 
+/** True when a bare identifier named `require` is the const binding made
+ * by `createRequire(import.meta.url | import.meta.filename | __filename)`.
+ * The statement-edge scan must not mistake those calls for Node's ambient
+ * CommonJS require: their per-call admission lives in lower-builtins.ts. */
+function isCreateRequireCall7(program: ts.Program, node: ts.Node): boolean {
+  const call = ts.isVariableDeclaration(node) ? node.initializer : node;
+  if (call === undefined || !ts.isCallExpression(call) || !ts.isIdentifier(call.expression)) return false;
+  const checker = program.getTypeChecker();
+  const requireSymbol = checker.getSymbolAtLocation(call.expression);
+  const requireDecl = requireSymbol ? checker.declarationsOf(requireSymbol)[0] : undefined;
+  if (
+    requireDecl === undefined || !ts.isVariableDeclaration(requireDecl) ||
+    !ts.isVariableDeclarationList(requireDecl.parent) ||
+    (requireDecl.parent.flags & ts.NodeFlags.Const) === 0 ||
+    requireDecl.initializer === undefined || !ts.isCallExpression(requireDecl.initializer) ||
+    !ts.isIdentifier(requireDecl.initializer.expression) ||
+    requireDecl.initializer.arguments.length !== 1
+  ) {
+    return false;
+  }
+  const base = requireDecl.initializer.arguments[0]!;
+  const currentFileBase =
+    (ts.isIdentifier(base) && base.text === "__filename") ||
+    (ts.isPropertyAccessExpression(base) && !base.questionDotToken &&
+      ts.isMetaProperty(base.expression) &&
+      base.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      (base.name.text === "url" || base.name.text === "filename"));
+  if (!currentFileBase) return false;
+  const createSymbol = checker.getSymbolAtLocation(requireDecl.initializer.expression);
+  const createDecl = createSymbol ? checker.declarationsOf(createSymbol)[0] : undefined;
+  if (createDecl === undefined || !ts.isImportSpecifier(createDecl)) return false;
+  const importDecl = createDecl.parent.parent.parent;
+  return (
+    ts.isImportDeclaration(importDecl) &&
+    ts.isStringLiteral(importDecl.moduleSpecifier) &&
+    canonicalBuiltinModule(importDecl.moduleSpecifier.text) === "module" &&
+    (createDecl.propertyName?.text ?? createDecl.name.text) === "createRequire"
+  );
+}
+
 /** True for top-level statements that cannot run user code: directives,
  * empty statements, hoisted declarations, require statements themselves,
  * and literal-initialized variables. A require preceded ONLY by these can
@@ -1632,19 +1672,6 @@ function preflight7(load: LoadResult): {
       const spec = specNode.text;
       const isRelative = isRelativeSpecifier(spec);
       const isBare = !isRelative && !ambientModules.has(spec);
-      // --npm-static: an opted-in package importing node:module admits
-      // for PROGRAM code (per-member fences, divergence 370) but marks
-      // the PACKAGE an offender — createRequire's static story covers
-      // only literal-specifier requires, and bundler banners (esbuild's
-      // __createRequire(import.meta.url) prologue) feed the returned
-      // require COMPUTED specifiers at module INIT, so a static compile
-      // would fence at load where the island runs the package as shipped.
-      if (canonicalBuiltinModule(spec) === "module") {
-        const pkg = npmStaticPackageOfPath(sf.fileName);
-        if (pkg !== null) {
-          reportNpmStaticOffender(pkg, "it imports node:module (bundler banners drive createRequire's require with computed specifiers; the island serves the package)");
-        }
-      }
       // An import edge Node's own resolution refuses BEFORE any module
       // evaluates: recorded as a startup-crash candidate (the Node-order
       // walk below picks the first one Node would report; the program
@@ -1855,6 +1882,7 @@ function preflight7(load: LoadResult): {
       for (let k = 0; k < stmts.length; k++) {
         const stmt = stmts[k]!;
         for (const req of requiresOf7(stmt)) {
+          if (isCreateRequireCall7(program, req.node)) continue;
           const loc = { file: sf.fileName, start: req.node.getStart(sf), end: req.node.getEnd() };
           if (isNodeEsmFile7(sf)) {
             diags.push(
