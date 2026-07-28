@@ -770,6 +770,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // error.new's result and the receiver slots are builtin-error classes —
   // program-dependent object types, checked in the libCall case.
   "error.new": { argTypes: [STRING], result: VOID },
+  "error.newCause": { argTypes: [STRING, DYN], result: VOID },
   "error.nodeThrow": { argTypes: [F64, STRING, STRING], result: VOID },
   "dyn.toStringCoerce": { argTypes: [DYN], result: STRING },
   // Always throws; the result is the READ's declared type (a typed dummy
@@ -780,6 +781,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "class.name": { argTypes: [null], result: STRING },
   "error.ctor": { argTypes: [null, STRING], result: VOID },
   "error.toString": { argTypes: [null], result: STRING },
+  "error.hasCause": { argTypes: [null], result: BOOL },
+  "error.cause": { argTypes: [null], result: DYN },
   // Receiver (any error-hierarchy object) and the program-dependent
   // `string | undefined` result are checked in the libCall case.
   "error.code": { argTypes: [null], result: VOID },
@@ -4046,10 +4049,18 @@ function validateFunction(
           // compiler-rendered fence.
           break;
         }
-        if (e.fn === "error.new") {
+        if (e.fn === "error.new" || e.fn === "error.newCause") {
           // Which builtin the runtime constructs is named by the result type.
           if (!isBuiltinErrorObject(e.type)) {
-            err(`libCall error.new must return a builtin error class, got ${e.type.kind}`, e.loc);
+            err(`libCall ${e.fn} must return a builtin error class, got ${e.type.kind}`, e.loc);
+          }
+          break;
+        }
+        if (e.fn === "error.hasCause" || e.fn === "error.cause") {
+          const recv = e.args[0];
+          if (!recv || recv.type.kind !== "object" ||
+            !(recv.type.className === "%Error" || isStrictSubclass(recv.type.className, "%Error"))) {
+            err(`libCall ${e.fn} receiver must be an error object`, e.loc);
           }
           break;
         }

@@ -8729,21 +8729,18 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     // Everything else fences: the runtime object carries no other dynamic
     // properties to ask (`stack` would be a lie — Node has one, we don't).
     if (recv.type.kind === "object") {
-      // %DOMException first: `'cause' in e` answers the options form's
-      // own-property record (the runtime slot), and code/name/message are
-      // always present.
-      if (recv.type.className === "%DOMException") {
-        if (key === "cause") {
-          return { kind: "libCall", fn: "error.domHasCause", args: [recv], type: BOOL, loc };
-        }
-        if ((key === "code" || key === "message" || key === "name") &&
-          (recv.kind === "varRef" || recv.kind === "caughtNarrow")) {
-          return { kind: "boolLit", value: true, type: BOOL, loc };
-        }
+      // DOMException's code plus the shared Error cause slot; name/message
+      // are always present.
+      if (recv.type.className === "%DOMException" && key === "code" &&
+        (recv.kind === "varRef" || recv.kind === "caughtNarrow")) {
+        return { kind: "boolLit", value: true, type: BOOL, loc };
       }
       let info = L.classes.get(recv.type.className) ?? null;
       while (info && info.base) info = info.base;
       if (info?.def.name === "%Error") {
+        if (key === "cause") {
+          return { kind: "libCall", fn: "error.hasCause", args: [recv], type: BOOL, loc };
+        }
         if (key === "code") {
           const codeType = L.envValueType();
           if (codeType.kind !== "union") throw new Error("lowerer bug: error code type is not a union");

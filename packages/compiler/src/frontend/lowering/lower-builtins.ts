@@ -4637,7 +4637,15 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
       }
       if (expr.name.text === "cause") {
         const receiver = L.lowerExpr(expr.expression);
-        return { kind: "libCall", fn: "error.domCause", args: [receiver], type: DYN, loc: locOf(expr) };
+        return { kind: "libCall", fn: "error.cause", args: [receiver], type: DYN, loc: locOf(expr) };
+      }
+    }
+    if (expr.name.text === "cause" && L.isStdlibMember(expr)) {
+      let info = L.classes.get(recvT.className) ?? null;
+      while (info && info.base) info = info.base;
+      if (info?.def.name === "%Error") {
+        const receiver = L.lowerExpr(expr.expression);
+        return { kind: "libCall", fn: "error.cause", args: [receiver], type: DYN, loc: locOf(expr) };
       }
     }
     if (expr.name.text !== "code") return null;

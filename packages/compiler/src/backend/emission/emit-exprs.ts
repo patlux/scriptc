@@ -5055,14 +5055,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             // the fiber while the loop watches fd 0.
             E.usesTimers = true;
             return finish(`scr_stdin_next_chunk()`);
-          case "error.new": {
+          case "error.new":
+          case "error.newCause": {
             // Which builtin the runtime constructs is named by the RESULT
-            // type; the message is borrowed (the runtime retains its copy).
-            // Never throws.
-            if (e.type.kind !== "object") throw new Error("emitter bug: error.new result is not a class");
+            // type; arguments are borrowed and the runtime retains copies.
+            if (e.type.kind !== "object") throw new Error(`emitter bug: ${e.fn} result is not a class`);
             const rec = RUNTIME_ERROR_CLASSES.get(e.type.className);
-            if (!rec) throw new Error(`emitter bug: error.new of ${e.type.className}`);
-            return finish(`scr_error_new(${rec.kind}, ${arg(0)})`);
+            if (!rec) throw new Error(`emitter bug: ${e.fn} of ${e.type.className}`);
+            return finish(
+              e.fn === "error.new"
+                ? `scr_error_new(${rec.kind}, ${arg(0)})`
+                : `scr_error_new_cause(${rec.kind}, ${arg(0)}, ${arg(1)})`,
+            );
           }
           case "error.ctor": {
             // super(message) into the builtin base: stamps name/message on
@@ -5077,6 +5081,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           case "error.toString":
             // Borrowed receiver; +1 "name: message" (Node's toString rules).
             return finish(`scr_error_to_string(${arg(0)})`);
+          case "error.hasCause":
+            return finish(`scr_error_has_cause(${arg(0)})`);
+          case "error.cause":
+            return finish(`scr_error_cause(${arg(0)})`);
           case "error.newDom":
             // new DOMException(message?, nameOrOptions?) — both dyn args
             // borrowed (WebIDL resolution runs in the runtime); +1

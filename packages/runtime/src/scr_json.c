@@ -1289,13 +1289,11 @@ ScrDyn *scr_dyn_from_error(const ScrError *e) {
   scr_dyn_obj_set(d, "name", 4, scr_dyn_new_str(e->name));
   scr_dyn_obj_set(d, "message", 7, scr_dyn_new_str(e->message));
   if (e->code) scr_dyn_obj_set(d, "code", 4, scr_dyn_new_str(e->code));
+  if (e->has_cause) scr_dyn_obj_set(d, "cause", 5, scr_error_cause((ScrError *)e));
   /* DOMException: `code` is the WebIDL legacy NUMBER (never the errno
-   * string slot), and the options form's cause crosses as itself. */
+   * string slot). The shared Error prefix already copied cause. */
   if (e->vt == &scr_error_vts[SCR_ERR_DOMEX]) {
     scr_dyn_obj_set(d, "code", 4, scr_dyn_new_num(scr_domex_code(( ScrError *)e)));
-    if (scr_domex_has_cause((ScrError *)e)) {
-      scr_dyn_obj_set(d, "cause", 5, scr_domex_cause((ScrError *)e));
-    }
   }
   if (scr_errdyn_n == scr_errdyn_cap) {
     scr_errdyn_cap = scr_errdyn_cap ? scr_errdyn_cap * 2 : 8;
@@ -1329,6 +1327,7 @@ ScrError *scr_error_from_dyn(const ScrDyn *d) {
   const ScrDyn *en = scr_dyn_obj_get(d, "name", 4);
   const ScrDyn *em = scr_dyn_obj_get(d, "message", 7);
   const ScrDyn *ec = scr_dyn_obj_get(d, "code", 4);
+  const ScrDyn *cause = scr_dyn_obj_get(d, "cause", 5);
   int k = SCR_ERR_ERROR;
   if (en && en->kind == SCR_DYN_STR) {
     const ScrStr *n = en->v.str;
@@ -1342,6 +1341,10 @@ ScrError *scr_error_from_dyn(const ScrDyn *d) {
     e->name = scr_str_retain(en->v.str);
   }
   if (ec && ec->kind == SCR_DYN_STR) e->code = scr_str_retain(ec->v.str);
+  if (cause) {
+    e->has_cause = true;
+    e->cause = scr_dyn_retain((ScrDyn *)cause);
+  }
   scr_errdyn_put(e, (ScrDyn *)d);
   return e;
 }
@@ -2847,20 +2850,32 @@ bool scr_dyn_has_own(const ScrDyn *v, const ScrStr *key) {
 ScrDyn *scr_dyn_obj_values(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWALK_VALUES); }
 ScrDyn *scr_dyn_obj_entries(const ScrDyn *v) { return scr_dyn_objwalk(v, SCR_OBJWALK_ENTRIES); }
 
-/* ── DOMException's dyn-touching half ─────────────────────────────────
- * Construction/cause/clone live HERE (not scr_error.c) so the error unit
- * stays linkable without the checked-dynamic tree (the runtime C-unit tests link
- * subsets). The cause teardown installs through scr_error.c's hook
- * before any cause can exist. */
+/* ── Error cause + DOMException's dyn-touching half ───────────────────
+ * Cause-bearing construction/access live HERE (not scr_error.c) so the
+ * error unit stays linkable without the checked-dynamic tree. */
 
-static void scr_domex_cause_drop_impl(void *obj) {
-  ScrDomException *d = (ScrDomException *)obj;
-  scr_dyn_release(d->cause);
-  d->cause = NULL;
+static void scr_error_cause_drop_impl(void *obj) {
+  ScrError *e = (ScrError *)obj;
+  scr_dyn_release(e->cause);
+  e->cause = NULL;
+}
+
+ScrError *scr_error_new_cause(int kind, ScrStr *message, const ScrDyn *cause) {
+  scr_error_install_cause_drop(&scr_error_cause_drop_impl);
+  ScrError *e = scr_error_new(kind, message);
+  e->has_cause = true;
+  e->cause = scr_dyn_retain((ScrDyn *)(cause ? cause : scr_dyn_undefined()));
+  return e;
+}
+
+bool scr_error_has_cause(ScrError *e) { return e->has_cause; }
+
+ScrDyn *scr_error_cause(ScrError *e) {
+  return e->cause ? scr_dyn_retain(e->cause) : scr_dyn_undefined();
 }
 
 ScrError *scr_domex_new(const ScrDyn *message, const ScrDyn *name_or_options) {
-  scr_domex_install_cause_drop(&scr_domex_cause_drop_impl);
+  scr_error_install_cause_drop(&scr_error_cause_drop_impl);
   ScrDomException *d = (ScrDomException *)scr_domex_alloc();
   d->message = (message == NULL || message->kind == SCR_DYN_UNDEF)
                    ? scr_str_new("", 0)
@@ -2889,10 +2904,7 @@ ScrError *scr_domex_new(const ScrDyn *message, const ScrDyn *name_or_options) {
   return (ScrError *)d;
 }
 
-ScrDyn *scr_domex_cause(ScrError *e) {
-  ScrDomException *d = (ScrDomException *)e;
-  return d->cause ? scr_dyn_retain(d->cause) : scr_dyn_undefined();
-}
+ScrDyn *scr_domex_cause(ScrError *e) { return scr_error_cause(e); }
 
 ScrError *scr_domex_clone(ScrError *e, const ScrDyn *options) {
   scr_sc_validate_options(options);

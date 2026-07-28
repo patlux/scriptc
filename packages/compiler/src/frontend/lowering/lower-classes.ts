@@ -332,18 +332,16 @@ export interface GenericClassInfo {
           name: irName,
           runtime: true,
           ...(rec.base ? { base: rec.base } : {}),
-          // Layout only — `%code` is ScrError's third slot (NULL = absent;
-          // fs/exec throw sites stamp it): subclass structs embed it in
-          // their prefix, and teardown releases it NULL-guarded like any
-          // string field. The '%' name keeps it out of user reach (a
-          // subclass declaring its own `code` field lays out AFTER it,
-          // never colliding), and it is NOT in the fields map below: the
-          // READ has its own `string | undefined` lowering (error.code),
-          // never a plain-string field access.
+          // Layout-only ScrError prefix slots. `%code` is NULL when absent;
+          // `%cause` plus `%hasCause` preserve ErrorOptions own-property
+          // presence (`cause: undefined` still counts). The '%' names keep
+          // them out of user field lookup; reads use dedicated libCalls.
           fields: [
             { name: "name", type: STRING },
             { name: "message", type: STRING },
             { name: "%code", type: STRING },
+            { name: "%cause", type: DYN },
+            { name: "%hasCause", type: BOOL },
           ],
           loc,
         },
@@ -4652,11 +4650,10 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
    * through aliases, so cross-module classes construct too). */
   /** The single message argument of a builtin Error construction or
    * super() call: "" when omitted or explicitly undefined (Node's message
-   * property default), the string otherwise. The lib signature's second
-   * parameter (options/cause) has no lowering. */
+   * property default), the string otherwise. */
   export function errorMessageArg(L: Lowerer, args: readonly ts.Expression[], loc: SrcLoc, blame: ts.Node): IrExpr {
     if (args.length > 1) {
-      L.unsupported("SC1090", args[1] ?? blame, "Error constructor options ('cause')");
+      L.unsupported("SC1090", args[1] ?? blame, "Error constructor options in subclass/inherited constructors");
     }
     if (args.length === 0) return { kind: "strLit", value: "", type: STRING, loc };
     const value = L.lowerExpr(args[0]!);
@@ -4942,7 +4939,59 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
         };
       }
       if (errInfo) {
-        const msg = L.errorMessageArg(expr.arguments ?? [], loc, expr);
+        const sourceArgs = expr.arguments ?? [];
+        if (sourceArgs.length > 2) {
+          L.unsupported("SC1090", sourceArgs[2]!, `Error constructors with ${sourceArgs.length} arguments`);
+        }
+        const msg = L.errorMessageArg(sourceArgs.slice(0, 1), loc, expr);
+        const options = sourceArgs[1];
+        if (options) {
+          if (!ts.isObjectLiteralExpression(options)) {
+            L.unsupported(
+              "SC1090",
+              options,
+              "Error constructor options except an inline `{ cause: value }` object",
+            );
+          }
+          if (options.properties.length === 0) {
+            return {
+              kind: "libCall",
+              fn: "error.new",
+              args: [msg],
+              type: { kind: "object", className: errInfo.def.name },
+              loc,
+            };
+          }
+          if (options.properties.length !== 1) {
+            L.unsupported(
+              "SC1090",
+              options,
+              "Error constructor options with members other than `cause`",
+            );
+          }
+          const prop = options.properties[0]!;
+          let causeNode: ts.Expression;
+          if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "cause") {
+            causeNode = prop.initializer;
+          } else if (ts.isShorthandPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "cause") {
+            causeNode = prop.name;
+          } else {
+            L.unsupported(
+              "SC1090",
+              prop,
+              "Error constructor options except an inline `{ cause: value }` object",
+            );
+          }
+          const rawCause = L.lowerExpr(causeNode);
+          const cause = L.coerceInto(causeNode, rawCause, DYN);
+          return {
+            kind: "libCall",
+            fn: "error.newCause",
+            args: [msg, cause],
+            type: { kind: "object", className: errInfo.def.name },
+            loc,
+          };
+        }
         return {
           kind: "libCall",
           fn: "error.new",

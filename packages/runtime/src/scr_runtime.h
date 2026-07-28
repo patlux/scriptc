@@ -382,10 +382,9 @@ typedef struct ScrError {
   ScrStr *name;    /* "TypeError", or whatever the user assigned */
   ScrStr *message; /* "" when constructed without one, like Node */
   ScrStr *code;    /* NULL = absent (Node: no `code` property); fs/exec
-                    * throw sites stamp the errno name ("ENOENT"). Part of
-                    * the layout prefix: the compiler's %Error class defs
-                    * carry a matching third field, so user subclasses
-                    * embed the slot and release it NULL-guarded. */
+                    * throw sites stamp the errno name ("ENOENT"). */
+  struct ScrDyn *cause; /* owned when non-NULL; the options form's value */
+  bool has_cause;       /* own-property presence (`undefined` still counts) */
 } ScrError;
 
 enum {
@@ -411,9 +410,9 @@ typedef struct ScrDomException {
   ScrStr *name;    /* "Error" default, or the resolved WebIDL name */
   ScrStr *message; /* "" when constructed without one */
   ScrStr *code;    /* the Node string-code slot (stays NULL here) */
+  struct ScrDyn *cause; /* the shared Error-options slot */
+  bool has_cause;       /* the options form carried a `cause` member */
   double dom_code; /* the WebIDL legacy code (0 when the name is off-table) */
-  bool has_cause;  /* the options form carried a `cause` member */
-  struct ScrDyn *cause; /* owned; NULL when has_cause is false */
 } ScrDomException;
 
 /* new DOMException(message?, nameOrOptions?) — both dyn args borrowed,
@@ -427,7 +426,7 @@ ScrError *scr_domex_new(const struct ScrDyn *message, const struct ScrDyn *name_
  * teardown hook scr_json.c installs before any cause can exist. */
 ScrError *scr_domex_alloc(void);
 double scr_domex_code_of(const ScrStr *name);
-void scr_domex_install_cause_drop(void (*fn)(void *obj));
+void scr_error_install_cause_drop(void (*fn)(void *obj));
 double scr_domex_code(ScrError *e);           /* borrowed receiver */
 bool scr_domex_has_cause(ScrError *e);        /* borrowed receiver */
 struct ScrDyn *scr_domex_cause(ScrError *e);  /* +1 (dyn undefined when absent) */
@@ -449,6 +448,12 @@ void scr_error_set_traced(void);
 /* Allocate + initialize (name = the kind's builtin name, message retained
  * from the borrowed argument; NULL means ""). Returns +1. */
 ScrError *scr_error_new(int kind, ScrStr *message);
+/* Construct a builtin Error with an own `cause` property. Both arguments
+ * are borrowed; returns +1. The dyn-touching implementation lives in
+ * scr_json.c and installs the teardown hook before storing the cause. */
+ScrError *scr_error_new_cause(int kind, ScrStr *message, const struct ScrDyn *cause);
+bool scr_error_has_cause(ScrError *e);        /* borrowed receiver */
+struct ScrDyn *scr_error_cause(ScrError *e);  /* +1 (dyn undefined when absent) */
 /* Initialize the error prefix of an already-allocated (zeroed) object —
  * the super(message) call of a compiled `extends Error` constructor. Both
  * arguments are borrowed. */

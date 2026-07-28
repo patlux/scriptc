@@ -29,36 +29,30 @@ static const char *const scr_error_names[5] = {
     "Error"};
 
 void scr_error_trace(void *e, ScrTraceVisit visit, void *ctx) {
-  /* name/message are strings — never collector-headered; nothing to visit. */
+  /* Strings and dyn values are not collector-headered; nothing to visit. */
   (void)e;
   (void)visit;
   (void)ctx;
 }
 
+/* The cause value is a ScrDyn — scr_json.c territory — and this file must
+ * stay linkable WITHOUT the checked-dynamic tree (runtime C-unit tests link
+ * subsets), so teardown goes through a hook scr_json.c installs before any
+ * cause can exist. */
+static void (*scr_error_cause_drop)(void *obj) = NULL;
+
+void scr_error_install_cause_drop(void (*fn)(void *obj)) {
+  scr_error_cause_drop = fn;
+}
+
 static void scr_error_gcfree(void *obj) {
   ScrError *e = (ScrError *)obj;
+  if (e->cause != NULL && scr_error_cause_drop != NULL) scr_error_cause_drop(obj);
   scr_str_release(e->name);
   scr_str_release(e->message);
   scr_str_release(e->code); /* NULL-safe: absent on most errors */
   scr_obj_free_note();
   scr_cyc_free(e);
-}
-
-/* DOMException teardown: the ScrError fields plus the owned cause dyn
- * value. The cause is a ScrDyn — scr_json.c territory — and this file
- * must stay linkable WITHOUT the checked-dynamic tree (the runtime C-unit tests link
- * subsets), so the drop goes through a hook scr_json.c installs before
- * any cause can exist (scr_domex_new is the only producer). */
-static void (*scr_domex_cause_drop)(void *obj) = NULL;
-
-void scr_domex_install_cause_drop(void (*fn)(void *obj)) {
-  scr_domex_cause_drop = fn;
-}
-
-static void scr_domex_gcfree(void *obj) {
-  ScrDomException *d = (ScrDomException *)obj;
-  if (d->cause != NULL && scr_domex_cause_drop != NULL) scr_domex_cause_drop(obj);
-  scr_error_gcfree(obj);
 }
 
 /* The DIRECT release stored in the builtin vtables (the compiler emits the
@@ -67,6 +61,7 @@ static void scr_error_reld(void *obj) {
   ScrError *e = (ScrError *)obj;
   if (--e->rc == 0) {
     if (scr_error_traced) scr_cyc_on_dead(e);
+    if (e->cause != NULL && scr_error_cause_drop != NULL) scr_error_cause_drop(obj);
     scr_str_release(e->name);
     scr_str_release(e->message);
     scr_str_release(e->code); /* NULL-safe: absent on most errors */
@@ -78,16 +73,6 @@ static void scr_error_reld(void *obj) {
   }
 }
 
-/* The DOMException vtable's direct release: the cause drops first, then
- * the shared ScrError teardown (through the hook — see scr_domex_gcfree). */
-static void scr_domex_reld(void *obj) {
-  ScrDomException *d = (ScrDomException *)obj;
-  if (d->rc == 1 && d->cause != NULL && scr_domex_cause_drop != NULL) {
-    scr_domex_cause_drop(obj);
-  }
-  scr_error_reld(obj);
-}
-
 /* Defaults cover only the instants before main() stamps the program's real
  * preorder intervals; release is permanent. */
 ScrVt scr_error_vts[5] = {
@@ -95,7 +80,7 @@ ScrVt scr_error_vts[5] = {
     {1, 1, &scr_error_reld}, /* TypeError */
     {2, 2, &scr_error_reld}, /* RangeError */
     {3, 3, &scr_error_reld}, /* SyntaxError */
-    {4, 4, &scr_domex_reld}, /* DOMException */
+    {4, 4, &scr_error_reld}, /* DOMException */
 };
 
 ScrError *scr_error_retain(ScrError *e) {
@@ -130,12 +115,11 @@ ScrTraceFn scr_error_trace_arg(void) {
 }
 
 /* Mode-aware allocation shared by every runtime-side error creation.
- * DOMException allocates its wider layout (and registers the teardown
- * that drops the cause); calloc/cyc_alloc zeroing covers the extra
- * slots' defaults (code 0, no cause). */
+ * DOMException allocates its wider layout; calloc/cyc_alloc zeroing covers
+ * all optional slots' defaults (no code/cause, legacy code 0). */
 static ScrError *scr_error_alloc(int kind) {
   size_t size = kind == SCR_ERR_DOMEX ? sizeof(ScrDomException) : sizeof(ScrError);
-  void (*gcfree)(void *) = kind == SCR_ERR_DOMEX ? &scr_domex_gcfree : &scr_error_gcfree;
+  void (*gcfree)(void *) = &scr_error_gcfree;
   ScrError *e;
   if (scr_error_traced) {
     e = scr_cyc_alloc(size, &scr_error_trace, gcfree);
@@ -310,9 +294,7 @@ ScrError *scr_domex_alloc(void) { return scr_error_alloc(SCR_ERR_DOMEX); }
 
 double scr_domex_code(ScrError *e) { return ((ScrDomException *)e)->dom_code; }
 
-bool scr_domex_has_cause(ScrError *e) {
-  return ((ScrDomException *)e)->has_cause;
-}
+bool scr_domex_has_cause(ScrError *e) { return e->has_cause; }
 
 void scr_throw_domex(const char *name, const char *message) {
   scr_throw_domex_str(name, scr_str_new(message, strlen(message)));

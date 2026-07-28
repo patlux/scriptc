@@ -11549,17 +11549,34 @@ class LlEmitter {
       B.line(`${raw} = call ptr @${sym}(ptr ${v.name})`);
       return this.wrapNullable(raw, raw, STRING, strTag, e.type, undefTag);
     }
-    if (e.fn === "error.new") {
+    if (e.fn === "error.new" || e.fn === "error.newCause") {
       // Which builtin the runtime constructs is named by the RESULT type;
-      // the message is borrowed (the runtime retains its copy). Never
-      // throws.
-      if (e.type.kind !== "object") throw new Error("llvm emitter bug: error.new result is not a class");
+      // arguments are borrowed and the runtime retains copies.
+      if (e.type.kind !== "object") throw new Error(`llvm emitter bug: ${e.fn} result is not a class`);
       const rec = RUNTIME_ERROR_CLASSES.get(e.type.className);
-      if (!rec) throw new Error(`llvm emitter bug: error.new of ${e.type.className}`);
+      if (!rec) throw new Error(`llvm emitter bug: ${e.fn} of ${e.type.className}`);
       const msg = this.emitExpr(e.args[0]!);
-      this.declare(`declare ptr @scr_error_new(i32, ptr)`);
       const t = B.tmp();
-      B.line(`${t} = call ptr @scr_error_new(i32 ${rec.kind}, ptr ${msg.name})`);
+      if (e.fn === "error.new") {
+        this.declare(`declare ptr @scr_error_new(i32, ptr)`);
+        B.line(`${t} = call ptr @scr_error_new(i32 ${rec.kind}, ptr ${msg.name})`);
+      } else {
+        const cause = this.emitExpr(e.args[1]!);
+        this.declare(`declare ptr @scr_error_new_cause(i32, ptr, ptr)`);
+        B.line(`${t} = call ptr @scr_error_new_cause(i32 ${rec.kind}, ptr ${msg.name}, ptr ${cause.name})`);
+      }
+      return this.own({ name: t, type: e.type });
+    }
+    if (e.fn === "error.hasCause" || e.fn === "error.cause") {
+      const recv = this.emitExpr(e.args[0]!);
+      const t = B.tmp();
+      if (e.fn === "error.hasCause") {
+        this.declare(`declare i1 @scr_error_has_cause(ptr)`);
+        B.line(`${t} = call i1 @scr_error_has_cause(ptr ${recv.name})`);
+        return { name: t, type: e.type };
+      }
+      this.declare(`declare ptr @scr_error_cause(ptr)`);
+      B.line(`${t} = call ptr @scr_error_cause(ptr ${recv.name})`);
       return this.own({ name: t, type: e.type });
     }
     if (e.fn === "error.ctor") {

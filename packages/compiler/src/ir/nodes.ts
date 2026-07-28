@@ -3046,6 +3046,9 @@ export type IrLibFn =
    * field to stamp. error.toString: borrowed `%Error`-typed receiver, +1
    * string in Node's "name: message" shape. None of the three throws. */
   | "error.new"
+  /** Cause-bearing Error construction: borrowed message + dyn cause,
+   * result an owned builtin error whose result type selects the kind. */
+  | "error.newCause"
   /** The compiler-resolved Node-parity throw for always-throwing lowered
    * arms (ERR_INVALID_THIS receivers, ERR_MISSING_ARGS arity ladders,
    * the symbol-to-string TypeError): args are [error-kind f64 (the
@@ -3074,6 +3077,11 @@ export type IrLibFn =
   | "class.name"
   | "error.ctor"
   | "error.toString"
+  /** Shared ErrorOptions cause surface over any %Error-rooted receiver.
+   * hasCause answers own-property presence; cause returns +1 dyn undefined
+   * when absent. */
+  | "error.hasCause"
+  | "error.cause"
   /** `new DOMException(message?, nameOrOptions?)` (scr_error.c): both args
    * are borrowed dyn values (the lowering passes the dyn undefined for an
    * absent argument, so WebIDL's optionality lives in one place). The
