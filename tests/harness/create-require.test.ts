@@ -28,19 +28,24 @@ async function run(cmd: string, args: string[]): Promise<RunResult> {
   }
 }
 
-async function build(entry: string, backend?: "c"): Promise<string> {
+async function build(entry: string, backend?: "c", dynamic = true): Promise<string> {
   const hash = createHash("sha256");
   for (const file of [entry, ...globSync(join(fixtureRoot, "**/*.{js,json}"))].sort()) {
     hash.update(file).update(readFileSync(file));
   }
-  const key = hash.update(sanitize ? "san" : "plain").update(backend ?? "default").digest("hex").slice(0, 16);
+  const key = hash
+    .update(sanitize ? "san" : "plain")
+    .update(backend ?? "default")
+    .update(dynamic ? "dynamic" : "static")
+    .digest("hex")
+    .slice(0, 16);
   const outDir = join(cacheDir, `create-require-${key}`);
   mkdirSync(outDir, { recursive: true });
   const result = await compile(entry, {
     outPath: join(outDir, "program"),
     outDir,
     sanitize,
-    dynamic: true,
+    dynamic,
     ...(backend === undefined ? {} : { backend }),
   });
   if (!result.ok) {
@@ -67,4 +72,19 @@ describe(`createRequire admission${sanitize ? " (sanitized)" : ""}`, () => {
     await expectDifferential("finite-set.js", backend);
   }, 120_000);
 
+  test.for([undefined, "c"] as const)("runtime-dynamic require traps catchably (%s backend)", async (backend) => {
+    await expectDifferential("dynamic-trap.js", backend);
+  }, 120_000);
+
+  test.for([undefined, "c"] as const)("guarded optional require falls back (%s backend)", async (backend) => {
+    await expectDifferential("optional-probe.js", backend);
+  }, 120_000);
+
+  test("static build keeps a clear runtime fence for a dynamic createRequire call", async () => {
+    const entry = join(fixtureRoot, "dynamic-trap.js");
+    const binary = await build(entry, "c", false);
+    const result = await run(binary, []);
+    expect(result.stdout.toString("utf8")).toBe("true SC2020\n");
+    expect(result.exitCode).toBe(0);
+  }, 120_000);
 });

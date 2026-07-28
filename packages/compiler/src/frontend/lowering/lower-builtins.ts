@@ -412,11 +412,17 @@ import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FSWATCHER_T, PROCSTRE
       return result;
     }
     if (cr.spec === null) {
-      L.noLowering(
-        "createRequire's require with this argument shape",
-        call,
-        "the compiled module graph is fixed at build time — use a finite build-known set of string literals",
-      );
+      if (!L.dynamic) {
+        L.noLowering(
+          "createRequire's require with this argument shape",
+          call,
+          "the compiled module graph is fixed at build time — use a finite build-known set of string literals, or build with --dynamic for a call-local trap",
+        );
+      }
+      const surface = cr.mode === "resolve" ? "require.resolve" : "require";
+      const message =
+        `Cannot find module '<runtime ${surface} specifier>'\nRequire stack:\n- ${resolve(cr.baseFile.fileName)}`;
+      return nodeThrowExpr(0, "MODULE_NOT_FOUND", message, cr.mode === "resolve" ? STRING : DYN, loc);
     }
     return lowerCreateRequireSpec(L, cr, cr.spec, loc);
   }
