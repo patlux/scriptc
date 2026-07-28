@@ -3307,7 +3307,6 @@ static ScrClosure *isl_child_callback(JSContext *ctx, JSValueConst fn, void *bod
 
 static void isl_child_call(ScrClosure *env, int argc, JSValueConst *argv) {
   ScrJsval *cell = scr_box_get_ref(env->caps[0]);
-  scr_island_host_enter();
   JSValue r = JS_Call(isl_ctx, cell->v, JS_UNDEFINED, argc, argv);
   if (JS_IsException(r)) isl_bridge_exception();
   else JS_FreeValue(isl_ctx, r);
@@ -3316,6 +3315,7 @@ static void isl_child_call(ScrClosure *env, int argc, JSValueConst *argv) {
 
 static void isl_child_exit_cb(ScrClosure *env, bool has_code, double code,
                               const char *signal_name) {
+  scr_island_host_enter();
   JSValue argv[2] = {
       has_code ? JS_NewFloat64(isl_ctx, code) : JS_NULL,
       signal_name ? JS_NewString(isl_ctx, signal_name) : JS_NULL,
@@ -3326,18 +3326,23 @@ static void isl_child_exit_cb(ScrClosure *env, bool has_code, double code,
 }
 
 static void isl_child_error_cb(ScrClosure *env, ScrStr *msg) {
+  scr_island_host_enter();
   JSValue argv[1] = {JS_NewStringLen(isl_ctx, msg->data, msg->len)};
   isl_child_call(env, 1, argv);
   JS_FreeValue(isl_ctx, argv[0]);
 }
 
 static void isl_child_data_cb(ScrClosure *env, ScrBytes *chunk) {
+  scr_island_host_enter();
   JSValue argv[1] = {JS_NewUint8ArrayCopy(isl_ctx, chunk->data, (size_t)scr_bytes_len(chunk))};
   isl_child_call(env, 1, argv);
   JS_FreeValue(isl_ctx, argv[0]);
 }
 
-static void isl_child_end_cb(ScrClosure *env) { isl_child_call(env, 0, NULL); }
+static void isl_child_end_cb(ScrClosure *env) {
+  scr_island_host_enter();
+  isl_child_call(env, 0, NULL);
+}
 
 static ScrArr *isl_child_string_array(JSContext *ctx, JSValueConst value) {
   JSValue lenv = JS_GetPropertyStr(ctx, value, "length");
