@@ -335,6 +335,42 @@ static void isl_rejection_tracker(JSContext *ctx, JSValueConst promise,
   isl_rejections_tail = &r->next;
 }
 
+/* QuickJS's JS_ToCString(Error) returns only the message on this engine
+ * snapshot, while JavaScript String(Error) renders "name: message". Keep
+ * the rejection reporter on the JavaScript contract without evaluating
+ * user code. */
+static void isl_print_rejection_reason(JSValueConst reason) {
+  if (JS_IsError(reason)) {
+    JSValue name_value = JS_GetPropertyStr(isl_ctx, reason, "name");
+    JSValue message_value = JS_GetPropertyStr(isl_ctx, reason, "message");
+    const char *name = JS_IsException(name_value) ? NULL : JS_ToCString(isl_ctx, name_value);
+    const char *message = JS_IsException(message_value) ? NULL : JS_ToCString(isl_ctx, message_value);
+    const char *safe_name = name ? name : "Error";
+    const char *safe_message = message ? message : "";
+    if (*safe_name) fputs(safe_name, stderr);
+    if (*safe_name && *safe_message) fputs(": ", stderr);
+    if (*safe_message) fputs(safe_message, stderr);
+    if (name) JS_FreeCString(isl_ctx, name);
+    if (message) JS_FreeCString(isl_ctx, message);
+    if (JS_IsException(name_value) || JS_IsException(message_value) || !name || !message) {
+      JSValue second = JS_GetException(isl_ctx);
+      JS_FreeValue(isl_ctx, second);
+    }
+    JS_FreeValue(isl_ctx, name_value);
+    JS_FreeValue(isl_ctx, message_value);
+    return;
+  }
+  const char *msg = JS_ToCString(isl_ctx, reason);
+  if (msg) {
+    fputs(msg, stderr);
+    JS_FreeCString(isl_ctx, msg);
+  } else {
+    JSValue second = JS_GetException(isl_ctx);
+    JS_FreeValue(isl_ctx, second);
+    fputs("[object]", stderr);
+  }
+}
+
 /* The report hook (scr_async.c calls it inside
  * scr_report_unhandled_rejections): print the first survivor when the
  * static ledger was silent, free the whole ledger either way. */
@@ -343,17 +379,7 @@ static bool isl_report_rejections(bool print) {
   if (print) {
     fflush(stdout);
     fputs("Unhandled promise rejection: ", stderr);
-    const char *msg = JS_ToCString(isl_ctx, isl_rejections->reason);
-    if (msg) {
-      fputs(msg, stderr);
-      JS_FreeCString(isl_ctx, msg);
-    } else {
-      /* String(reason) itself threw (a symbol): clear it, keep the same
-       * fallback the static printer uses for unrenderable payloads. */
-      JSValue second = JS_GetException(isl_ctx);
-      JS_FreeValue(isl_ctx, second);
-      fputs("[object]", stderr);
-    }
+    isl_print_rejection_reason(isl_rejections->reason);
     fputc('\n', stderr);
   }
   while (isl_rejections) {
