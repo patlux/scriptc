@@ -84,4 +84,19 @@ console.log(dyn.values[0].value);
 `,
     );
   });
+
+  test("covers direct dyn-call arguments and optional property access", async () => {
+    await compileAndCompare(
+      "dyn-call-variants",
+      `${prelude}
+const dyn = JSON.parse('{"values":[]}');
+dyn.values.push(/** @type {Item} */ (concrete).value);
+dyn.values.push({
+  direct: /** @type {Item} */ (concrete).value,
+  optional: /** @type {Item} */ (concrete)?.value,
+});
+console.log(dyn.values[0], dyn.values[1].direct, dyn.values[1].optional);
+`,
+    );
+  });
 });
