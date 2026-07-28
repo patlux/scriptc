@@ -218,19 +218,15 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect((total - failed) / total).toBeGreaterThanOrEqual(0.85);
   }, 180_000);
 
-  // Tier 3: the island fallback — esbundled's chunk requires "net", an
-  // unshimmed-builtin edge preflight refuses for a static package, so the
-  // opt-in DROPS with a note and the --dynamic build keeps the exact
-  // island behavior lazybuiltin.ts pins in npm.test.ts.
-  test("a preflight-refused package falls back to the island with a note", () => {
+  // Per-call createRequire admission: importing node:module no longer
+  // degrades esbundled package-wide. Its unshimmed builtin remains a lazy
+  // call-site trap under --dynamic, pinned by npm.test.ts.
+  test("an unshimmed createRequire edge stays package-static and traps lazily", () => {
     const { coverage } = analyze(join(fixturesRoot, "npm/divergent/lazybuiltin.ts"), {
       dynamic: true,
       npmStatic: ["esbundled"],
     });
-    const statuses = coverage.npmStatic ?? [];
-    expect(statuses).toHaveLength(1);
-    expect(statuses[0]?.package).toBe("esbundled");
-    expect(statuses[0]?.status).toBe("fallback");
+    expect(coverage.npmStatic).toEqual([{ package: "esbundled", status: "static" }]);
     expect(coverage.preflightFailed).toBe(false);
   }, 120_000);
 
