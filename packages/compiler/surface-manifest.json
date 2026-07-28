@@ -1014,6 +1014,12 @@
       "status": "static"
     },
     {
+      "id": "node-builtin.fs.renameSync",
+      "kind": "node-builtin",
+      "name": "fs.renameSync",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.fs.rmSync",
       "kind": "node-builtin",
       "name": "fs.rmSync",
