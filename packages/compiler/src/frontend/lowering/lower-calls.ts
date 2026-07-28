@@ -3870,6 +3870,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       }
       return { kind: "callValue", callee, args, type: callee.type.ret, loc };
     }
+    if (ts.isElementAccessExpression(expr.expression)) {
+      const computedClassMethod = lowerWellKnownSymbolMethodCall(L, expr, expr.expression);
+      if (computedClassMethod) return computedClassMethod;
+    }
     if (ts.isPropertyAccessExpression(expr.expression)) {
       const intrinsic =
         // Builtin namespace imports first (`fs.readFileSync(...)` where fs
@@ -8523,6 +8527,29 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
    * everything else — standalone classes, non-overridden methods, leaf
    * receivers — stays a direct `call` of the nearest declaration, exactly
    * as before inheritance existed. */
+  /** `obj[Symbol.asyncIterator](...)` for supported well-known computed
+   * class methods. The method slot resolves statically from the receiver's
+   * class; no free-standing symbol-keyed property is materialized. */
+  export function lowerWellKnownSymbolMethodCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.ElementAccessExpression,): IrExpr | null {
+    if (L.chainBlocked(access, call)) return null;
+    let key = access.argumentExpression;
+    while (ts.isParenthesizedExpression(key)) key = key.expression;
+    if (!ts.isPropertyAccessExpression(key)) return null;
+    const wellKnown = L.stdlibGlobalMember(key, "Symbol");
+    if (wellKnown !== "asyncIterator") return null;
+    const receiverT = L.mapTypeOf(L.typeOf(access.expression));
+    if (receiverT?.kind !== "object") return null;
+    const info = L.classes.get(receiverT.className);
+    if (!info) return null;
+    const member = `sym:${wellKnown}`;
+    const found = L.findMethodOn(info, member);
+    if (!found) return null;
+    const args = L.completeArgs(call.arguments, found.sig.params, locOf(call), call);
+    const receiver = L.lowerExpr(access.expression);
+    return L.accessorCall(info.def.name, member, receiver, args, found.sig.ret, locOf(call));
+  }
+
   export function lowerObjectMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (L.chainBlocked(access, call)) return null;

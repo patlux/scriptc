@@ -3828,11 +3828,11 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
    * COMPUTED name that folds to one compile-time string
    * (foldedStringKeyOf — the object-literal computed-key machinery
    * applied to method positions; tsc late-bound the member under exactly
-   * that name), or the reserved slot "sym:iterator" for
-   * `[Symbol.iterator]` (a name no user identifier can spell — the
-   * accessor "get:x" convention; for-of, spreads, and array destructuring
-   * dispatch to it through the iterator protocol). Null for genuinely
-   * runtime-keyed names — the computed-member fences stay. */
+   * that name), or a reserved `sym:<well-known>` slot for supported
+   * well-known Symbol keys. `sym:iterator` drives for-of/spread protocol;
+   * other slots (currently asyncIterator) support explicit element-call
+   * dispatch without reifying symbol-keyed object storage. Null for
+   * genuinely runtime-keyed names — the computed-member fences stay. */
   export function classMemberNameOf(L: Lowerer, name: ts.PropertyName): string | null {
     if (ts.isIdentifier(name)) return name.text;
     // #private methods key by their spelled name ('#m') — '#' is
@@ -3841,8 +3841,9 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
     if (!ts.isComputedPropertyName(name)) return null;
     let e = name.expression;
     while (ts.isParenthesizedExpression(e)) e = e.expression;
-    if (ts.isPropertyAccessExpression(e) && L.stdlibGlobalMember(e, "Symbol") === "iterator") {
-      return "sym:iterator";
+    if (ts.isPropertyAccessExpression(e)) {
+      const wellKnown = L.stdlibGlobalMember(e, "Symbol");
+      if (wellKnown === "iterator" || wellKnown === "asyncIterator") return `sym:${wellKnown}`;
     }
     return L.foldedStringKeyOf(name.expression);
   }
