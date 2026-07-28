@@ -38,6 +38,9 @@
 #include <string.h>
 #ifndef _WIN32
 #include <poll.h>
+#include <unistd.h>
+#else
+#include <process.h>
 #endif
 
 #include "quickjs.h"
@@ -131,6 +134,97 @@ static const JSMallocFunctions isl_mf = {
 
 static JSRuntime *isl_rt = NULL;
 static JSContext *isl_ctx = NULL;
+
+/* ── opt-in runtime-path trace ────────────────────────────────────────
+ * SCRIPTC_RUNTIME_TRACE=/absolute/path.json enables one best-effort JSON
+ * snapshot at normal process teardown. The emitted main calls install only
+ * for programs whose IR can reach the island, so fully static and island-
+ * free dynamic binaries do not pull this translation unit in for tracing.
+ * Values are fixed counters/categories only: no source, environment value,
+ * request data, or caller-provided string enters the document. */
+typedef enum {
+  ISL_ENTRY_EVAL,
+  ISL_ENTRY_MODULE,
+  ISL_ENTRY_REGEX,
+  ISL_ENTRY_HOST,
+  ISL_ENTRY_JOBS,
+  ISL_ENTRY_VALUE,
+  ISL_ENTRY_COUNT,
+} IslEntryReason;
+
+static const char *const isl_entry_reason_names[ISL_ENTRY_COUNT] = {
+    "eval", "module", "regex", "host-callback", "jobs", "value",
+};
+static char *isl_trace_path = NULL;
+static unsigned long long isl_trace_entries[ISL_ENTRY_COUNT] = {0};
+static unsigned long long isl_trace_entry_count = 0;
+static unsigned long long isl_trace_init_count = 0;
+static bool isl_trace_quickjs_initialized = false;
+
+static bool isl_trace_path_absolute(const char *path) {
+#ifdef _WIN32
+  size_t len = strlen(path);
+  return (len >= 3 && path[1] == ':' &&
+          (path[2] == '/' || path[2] == '\\')) ||
+         (len >= 2 && path[0] == '\\' && path[1] == '\\');
+#else
+  return path[0] == '/';
+#endif
+}
+
+static void isl_trace_write_at_exit(void) {
+  if (!isl_trace_path) return;
+  size_t path_len = strlen(isl_trace_path);
+  char *tmp = malloc(path_len + 48);
+  if (!tmp) return;
+  int n = snprintf(tmp, path_len + 48, "%s.tmp.%ld", isl_trace_path,
+                   (long)getpid());
+  if (n < 0 || (size_t)n >= path_len + 48) {
+    free(tmp);
+    return;
+  }
+  FILE *f = fopen(tmp, "wb");
+  if (!f) {
+    free(tmp);
+    return;
+  }
+  int ok = fprintf(
+      f,
+      "{\"schemaVersion\":1,\"quickjsInitialized\":%s,"
+      "\"islandInitializationCount\":%llu,\"islandEntryCount\":%llu,"
+      "\"entryCountsByReason\":{",
+      isl_trace_quickjs_initialized ? "true" : "false",
+      isl_trace_init_count, isl_trace_entry_count) >= 0;
+  for (int i = 0; ok && i < ISL_ENTRY_COUNT; i++) {
+    ok = fprintf(f, "%s\"%s\":%llu", i == 0 ? "" : ",",
+                 isl_entry_reason_names[i], isl_trace_entries[i]) >= 0;
+  }
+  if (ok) ok = fputs("}}\n", f) >= 0;
+  if (fclose(f) != 0) ok = 0;
+  if (!ok || rename(tmp, isl_trace_path) != 0) remove(tmp);
+  free(tmp);
+}
+
+void scr_island_trace_install(void) {
+  if (isl_trace_path) return;
+  const char *path = getenv("SCRIPTC_RUNTIME_TRACE");
+  if (!path || !isl_trace_path_absolute(path)) return;
+  size_t len = strlen(path);
+  char *copy = malloc(len + 1);
+  if (!copy) return;
+  memcpy(copy, path, len + 1);
+  if (atexit(isl_trace_write_at_exit) != 0) {
+    free(copy);
+    return;
+  }
+  isl_trace_path = copy;
+}
+
+static void isl_trace_entry(IslEntryReason reason) {
+  if (!isl_trace_path) return;
+  isl_trace_entry_count++;
+  isl_trace_entries[reason]++;
+}
 
 /* ── embedded npm module tables (emitted static data) ─────────────────── */
 
@@ -553,6 +647,8 @@ static void isl_teardown_at_exit(void) {
 }
 
 static void isl_init(void) {
+  isl_trace_init_count++;
+  isl_trace_quickjs_initialized = true;
   isl_rt = JS_NewRuntime2(&isl_mf, NULL);
   if (!isl_rt) {
     fprintf(stderr, "scriptc: island engine runtime allocation failed\n");
@@ -664,7 +760,8 @@ static void isl_anchor_here(void) {
  * stack-overflow check to the CURRENT stack (main or any fiber) and size
  * the budget for it — except while the engine itself is calling back
  * into static code ON THIS STACK. */
-static void isl_entry(void) {
+static void isl_entry(IslEntryReason reason) {
+  isl_trace_entry(reason);
   if (!isl_rt) isl_init();
   if (isl_host_depth > 0) {
     if (scr_fiber_self() == isl_anchor_fiber) return;
@@ -680,14 +777,14 @@ static void isl_entry(void) {
  * regex-using --dynamic program routes regex compilation/execution through
  * the island's context, booting the engine lazily on first regex use. */
 void *scr_island_lre_opaque(void) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_REGEX);
   return isl_ctx;
 }
 
 /* Units entering the engine from loop dispatch stations (the fetch
  * bridge's net callbacks fire from scr_net's dispatch, not through an
  * emitted island op) re-anchor through here — the every-entry rule. */
-void scr_island_host_enter(void) { isl_entry(); }
+void scr_island_host_enter(void) { isl_entry(ISL_ENTRY_HOST); }
 
 /* ── the loop's io hook (engine jobs at quiescence) ───────────────────
  * Island promise jobs (a .then chain inside embedded package code) have no
@@ -698,7 +795,7 @@ void scr_island_host_enter(void) { isl_entry(); }
 
 int scr_island_drain_jobs(void) {
   if (!isl_rt) return 0;
-  isl_entry();
+  isl_entry(ISL_ENTRY_JOBS);
   int n = 0;
   for (;;) {
     JSContext *jctx;
@@ -859,7 +956,7 @@ static ScrStr *isl_js_to_str(JSValueConst v) {
  * exception: bridges it (catchable via the pending cell) and returns NULL —
  * callers are compiler-emitted pending checks, like the fs.* surface. */
 ScrStr *scr_island_eval(ScrStr *code) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_EVAL);
   JSValue r = JS_Eval(isl_ctx, code->data, code->len, "<island>",
                       JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(r)) {
@@ -981,17 +1078,17 @@ void scr_jsval_release_v(void *v) { scr_jsval_release(v); }
 /* ── marshal in ─────────────────────────────────────────────────────── */
 
 ScrJsval *scr_jsval_from_f64(double v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return isl_cell_new(JS_NewFloat64(isl_ctx, v));
 }
 
 ScrJsval *scr_jsval_from_bool(bool v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return isl_cell_new(JS_NewBool(isl_ctx, v));
 }
 
 ScrJsval *scr_jsval_from_str(const ScrStr *s) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return isl_cell_new(JS_NewStringLen(isl_ctx, s->data, s->len));
 }
 
@@ -1000,7 +1097,7 @@ ScrJsval *scr_jsval_from_str(const ScrStr *s) {
  * input is machine-produced valid JSON, so a parse failure is an
  * engine-level surprise; bridge it like any exception rather than trust. */
 ScrJsval *scr_jsval_from_json(const ScrStr *json) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue v = JS_ParseJSON(isl_ctx, json->data, json->len, "<scr-marshal>");
   if (JS_IsException(v)) {
     isl_bridge_exception();
@@ -1108,7 +1205,7 @@ ScrJsval *scr_jsval_from_dyn(const ScrDyn *d) {
    * — the one direction that used to throw (SEMANTICS.md supersedes the
    * "one unbridgeable mix"). */
   if (d->kind == SCR_DYN_JSVAL) return scr_jsval_retain(d->v.jsval.cell);
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   const char *bad = isl_dyn_unmarshalable(d);
   if (bad != NULL) {
     char msg[128];
@@ -1180,7 +1277,7 @@ static ScrDyn *isl_dyn_from_value(JSValue v) {
  * with the engine's message. */
 
 static ScrDyn *isl_dynjs_key_get(ScrJsval *cell, const ScrStr *k) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue key = JS_NewStringLen(isl_ctx, k->data, k->len);
   JSValue argv[2] = {cell->v, key};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_GETIDX], JS_UNDEFINED, 2, argv);
@@ -1197,7 +1294,7 @@ static ScrDyn *isl_dynjs_key_get(ScrJsval *cell, const ScrStr *k) {
 static bool isl_dynjs_key_set(ScrJsval *cell, const ScrStr *k, const ScrDyn *v) {
   ScrJsval *vj = scr_jsval_from_dyn(v);
   if (!vj) return false; /* unmarshalable value — the catchable TypeError */
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue key = JS_NewStringLen(isl_ctx, k->data, k->len);
   JSValue argv[3] = {cell->v, key, vj->v};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_SETIDX], JS_UNDEFINED, 3, argv);
@@ -1241,7 +1338,7 @@ static ScrDyn *isl_dynjs_call(ScrJsval *cell, ScrDyn *const *args, size_t argc) 
 }
 
 static ScrDyn *isl_dynjs_invoke(ScrJsval *cell, const char *method, ScrDyn *const *args, size_t argc, const char *what) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue fn = JS_GetPropertyStr(isl_ctx, cell->v, method); /* owned */
   if (JS_IsException(fn)) {
     isl_bridge_exception();
@@ -1287,7 +1384,7 @@ static bool isl_dynjs_is_nullish(ScrJsval *cell) {
 }
 
 static ScrDyn *isl_dynjs_obj_walk(ScrJsval *cell, int mode) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue m = JS_NewInt32(isl_ctx, mode);
   JSValue argv[2] = {cell->v, m};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_OBJWALK], JS_UNDEFINED, 2, argv);
@@ -1324,7 +1421,7 @@ static ScrDyn *isl_dynjs_obj_walk(ScrJsval *cell, int mode) {
 }
 
 static int isl_dynjs_has_own(ScrJsval *cell, const ScrStr *k) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue key = JS_NewStringLen(isl_ctx, k->data, k->len);
   JSValue argv[2] = {cell->v, key};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_HASOWN], JS_UNDEFINED, 2, argv);
@@ -1341,7 +1438,7 @@ static int isl_dynjs_has_own(ScrJsval *cell, const ScrStr *k) {
 static bool isl_dynjs_assign(ScrJsval *cell, const ScrDyn *src) {
   ScrJsval *sj = scr_jsval_from_dyn(src);
   if (!sj) return false;
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[2] = {cell->v, sj->v};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_ASSIGN], JS_UNDEFINED, 2, argv);
   scr_jsval_release(sj);
@@ -1356,7 +1453,7 @@ static bool isl_dynjs_assign(ScrJsval *cell, const ScrDyn *src) {
 static ScrStr *isl_dynjs_to_json(ScrJsval *cell) { return scr_jsval_to_json(cell); }
 
 static ScrDyn *isl_dynjs_iter_drain(ScrJsval *cell, bool spread, const ScrStr *spell) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue m = JS_NewInt32(isl_ctx, spread ? 1 : 0);
   JSValue s = spell && spell->len > 0
     ? JS_NewStringLen(isl_ctx, spell->data, spell->len)
@@ -1406,7 +1503,7 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
 };
 
 ScrDyn *scr_dyn_from_jsval(ScrJsval *cell) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue v = cell->v;
   /* Scalar normalization: engine-reported scalars become the NATIVE dyn
    * kinds at wrap time (the strict exits cannot fail on them), so every
@@ -1432,7 +1529,7 @@ ScrDyn *scr_dyn_from_jsval(ScrJsval *cell) {
 /* ── operators (through the pinned prelude helpers) ───────────────────── */
 
 ScrJsval *scr_jsval_binop(int op, ScrJsval *a, ScrJsval *b) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[2] = {a->v, b->v};
   JSValue r = JS_Call(isl_ctx, isl_helpers[op], JS_UNDEFINED, 2, argv);
   if (JS_IsException(r)) {
@@ -1443,7 +1540,7 @@ ScrJsval *scr_jsval_binop(int op, ScrJsval *a, ScrJsval *b) {
 }
 
 int scr_jsval_cmp(int op, ScrJsval *a, ScrJsval *b) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[2] = {a->v, b->v};
   JSValue r = JS_Call(isl_ctx, isl_helpers[op], JS_UNDEFINED, 2, argv);
   if (JS_IsException(r)) {
@@ -1456,7 +1553,7 @@ int scr_jsval_cmp(int op, ScrJsval *a, ScrJsval *b) {
 }
 
 int scr_jsval_instance_of(ScrJsval *v, ScrJsval *c) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   /* JS_IsInstanceOf IS the spec's InstanceofOperator — Symbol.hasInstance
    * included; a non-callable/non-object RHS throws the engine's own
    * TypeError, bridged catchably like every island op. */
@@ -1469,7 +1566,7 @@ int scr_jsval_instance_of(ScrJsval *v, ScrJsval *c) {
 }
 
 static ScrJsval *isl_call1(int helper, ScrJsval *a) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue r = JS_Call(isl_ctx, isl_helpers[helper], JS_UNDEFINED, 1, &a->v);
   if (JS_IsException(r)) {
     isl_bridge_exception();
@@ -1485,12 +1582,12 @@ ScrJsval *scr_jsval_iter_new(ScrJsval *a) { return isl_call1(ISL_H_ITER, a); }
 ScrJsval *scr_jsval_plus(ScrJsval *a) { return isl_call1(ISL_H_PLUS, a); }
 
 int scr_jsval_truthy(ScrJsval *a) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return JS_ToBool(isl_ctx, a->v) > 0; /* ToBoolean never throws */
 }
 
 ScrStr *scr_jsval_typeof(ScrJsval *a) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_TYPEOF], JS_UNDEFINED, 1, &a->v);
   /* typeof cannot throw; the result is always an engine string. */
   ScrStr *s = isl_js_to_str(r);
@@ -1499,14 +1596,14 @@ ScrStr *scr_jsval_typeof(ScrJsval *a) {
 }
 
 ScrStr *scr_jsval_to_str(ScrJsval *a) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return isl_js_to_str(a->v); /* NULL = bridged (e.g. a symbol) */
 }
 
 /* ── property/element access and calls ────────────────────────────────── */
 
 ScrJsval *scr_jsval_get_prop(ScrJsval *o, const ScrStr *name) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue r = JS_GetPropertyStr(isl_ctx, o->v, name->data); /* owned */
   if (JS_IsException(r)) {
     isl_bridge_exception();
@@ -1518,7 +1615,7 @@ ScrJsval *scr_jsval_get_prop(ScrJsval *o, const ScrStr *name) {
 /* A member of the engine's global object by name (Math, parseFloat, ...) —
  * the receiver/callee for the island-backed ambient surface. */
 ScrJsval *scr_jsval_global_get(const ScrStr *name) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue g = JS_GetGlobalObject(isl_ctx); /* owned */
   JSValue r = JS_GetPropertyStr(isl_ctx, g, name->data); /* owned */
   JS_FreeValue(isl_ctx, g);
@@ -1530,7 +1627,7 @@ ScrJsval *scr_jsval_global_get(const ScrStr *name) {
 }
 
 int scr_jsval_set_prop(ScrJsval *o, const ScrStr *name, ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   /* JS_SetPropertyStr CONSUMES its value argument — dup, the cell keeps
    * its own reference. */
   if (JS_SetPropertyStr(isl_ctx, o->v, name->data, JS_DupValue(isl_ctx, v->v)) < 0) {
@@ -1545,7 +1642,7 @@ int scr_jsval_set_prop(ScrJsval *o, const ScrStr *name, ScrJsval *v) {
  * other value passes through (+1 cell). `first` is the pattern's first
  * property name or NULL for the empty pattern's bare form. */
 ScrJsval *scr_jsval_destr_check(ScrJsval *v, const char *spell, const char *first) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[3];
   argv[0] = v->v;
   argv[1] = JS_NewString(isl_ctx, spell);
@@ -1565,7 +1662,7 @@ ScrJsval *scr_jsval_destr_check(ScrJsval *v, const char *spell, const char *firs
  * IteratorClose when the iterator was not exhausted; non-iterables throw
  * V8's exact not-iterable TypeError catchably. */
 ScrJsval *scr_jsval_iter_n(ScrJsval *v, double n) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[2];
   argv[0] = v->v;
   argv[1] = JS_NewFloat64(isl_ctx, n);
@@ -1579,7 +1676,7 @@ ScrJsval *scr_jsval_iter_n(ScrJsval *v, double n) {
 }
 
 ScrJsval *scr_jsval_get_idx(ScrJsval *o, ScrJsval *key) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[2] = {o->v, key->v};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_GETIDX], JS_UNDEFINED, 2, argv);
   if (JS_IsException(r)) {
@@ -1590,7 +1687,7 @@ ScrJsval *scr_jsval_get_idx(ScrJsval *o, ScrJsval *key) {
 }
 
 int scr_jsval_set_idx(ScrJsval *o, ScrJsval *key, ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[3] = {o->v, key->v, v->v};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_SETIDX], JS_UNDEFINED, 3, argv);
   if (JS_IsException(r)) {
@@ -1602,7 +1699,7 @@ int scr_jsval_set_idx(ScrJsval *o, ScrJsval *key, ScrJsval *v) {
 }
 
 ScrJsval *scr_jsval_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue fn = JS_GetPropertyStr(isl_ctx, o->v, name->data); /* owned */
   if (JS_IsException(fn)) {
     isl_bridge_exception();
@@ -1625,7 +1722,7 @@ ScrJsval *scr_jsval_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJs
  * the engine's undefined (JS: exactly `o.name?.()`); anything else calls
  * with `this = o`, non-callables throwing the engine's own TypeError. */
 ScrJsval *scr_jsval_opt_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue fn = JS_GetPropertyStr(isl_ctx, o->v, name->data); /* owned */
   if (JS_IsException(fn)) {
     isl_bridge_exception();
@@ -1649,7 +1746,7 @@ ScrJsval *scr_jsval_opt_call_method(ScrJsval *o, const ScrStr *name, int argc, S
 }
 
 ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue stack_args[8];
   JSValue *args = argc <= 8 ? stack_args : malloc((size_t)argc * sizeof(JSValue));
   for (int i = 0; i < argc; i++) args[i] = argv[i]->v;
@@ -1668,7 +1765,7 @@ ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv) {
  * texts (`what` is the spread expression's source spelling). Borrows
  * everything; +1 out, or NULL with the engine exception bridged. */
 ScrJsval *scr_jsval_call_spread(ScrJsval *f, ScrJsval *pre, ScrJsval *spread, const ScrStr *what) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue argv[4] = {f->v, pre->v, spread->v, JS_NewStringLen(isl_ctx, what->data, what->len)};
   JSValue r = JS_Call(isl_ctx, isl_helpers[ISL_H_CALLSPREAD], JS_UNDEFINED, 4, argv);
   JS_FreeValue(isl_ctx, argv[3]);
@@ -1682,7 +1779,7 @@ ScrJsval *scr_jsval_call_spread(ScrJsval *f, ScrJsval *pre, ScrJsval *spread, co
 /* `new X(...)` on an island callee (jsOp construct). Borrows everything;
  * +1 out, or NULL with the engine exception bridged. */
 ScrJsval *scr_jsval_construct(ScrJsval *f, int argc, ScrJsval **argv) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue stack_args[8];
   JSValue *args = argc <= 8 ? stack_args : malloc((size_t)argc * sizeof(JSValue));
   for (int i = 0; i < argc; i++) args[i] = argv[i]->v;
@@ -1872,7 +1969,7 @@ static JSValue isl_hostfn_invoke(JSContext *ctx, JSValueConst this_val, int argc
 
 ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
                                   ScrJsval *(*adapt)(ScrClosure *, ScrJsval **)) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   /* Negative arity = the island-rest shape; the CELL count is the leading
    * declared params + the one rest-array slot. */
   if ((arity < 0 ? -arity : arity) > ISL_HOSTFN_MAX_ARITY) {
@@ -2047,7 +2144,7 @@ static void isl_prom_wrap_entry(ScrFiber *self, void *arg) {
   default: scr_await_void(w->p); break;
   }
   bool rejected = scr_exc_pending();
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue v;
   if (rejected) {
     v = isl_pending_to_value(isl_ctx);
@@ -2097,7 +2194,7 @@ static void isl_prom_wraps_teardown(void) {
 }
 
 ScrJsval *scr_jsval_from_promise(ScrPromise *p, int payload) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue funcs[2];
   JSValue prom = JS_NewPromiseCapability(isl_ctx, funcs);
   if (JS_IsException(prom)) {
@@ -2217,7 +2314,7 @@ static JSValue isl_bridge_settle(JSContext *ctx, JSValueConst this_val, int argc
 }
 
 ScrPromise *scr_jsval_bridge_promise(ScrJsval *v, int payload) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   IslBridge *b = malloc(sizeof *b);
   if (!b) {
     fprintf(stderr, "scriptc: out of memory\n");
@@ -2251,7 +2348,7 @@ ScrPromise *scr_jsval_bridge_promise(ScrJsval *v, int payload) {
  * value — dup, the caller's cells keep their own references. JS_ValueToAtom
  * borrows. */
 ScrJsval *scr_jsval_obj_lit(int npairs, ScrJsval **kv) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue o = JS_NewObject(isl_ctx);
   for (int i = 0; i < npairs; i++) {
     JSAtom k = JS_ValueToAtom(isl_ctx, kv[2 * i]->v);
@@ -2267,7 +2364,7 @@ ScrJsval *scr_jsval_obj_lit(int npairs, ScrJsval **kv) {
  * template hands its tag (a JSON marshal would drop `.raw`, and tags
  * dispatch on it). */
 ScrJsval *scr_jsval_tpl_strings(int n, ScrJsval **kv) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue cooked = JS_NewArray(isl_ctx);
   JSValue raw = JS_NewArray(isl_ctx);
   for (int i = 0; i < n; i++) {
@@ -2284,7 +2381,7 @@ ScrJsval *scr_jsval_tpl_strings(int n, ScrJsval **kv) {
  * answers the target retained (+1). NULL with the exception pending when
  * a source getter throws. */
 ScrJsval *scr_jsval_obj_spread(ScrJsval *obj, ScrJsval *src) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (JS_IsNull(src->v) || JS_IsUndefined(src->v)) return scr_jsval_retain(obj);
   JSValue global = JS_GetGlobalObject(isl_ctx);
   JSValue object_ctor = JS_GetPropertyStr(isl_ctx, global, "Object");
@@ -2307,7 +2404,7 @@ ScrJsval *scr_jsval_obj_spread(ScrJsval *obj, ScrJsval *src) {
  * answers the object retained (+1) so builds chain. Enumerable +
  * configurable, no setter — exactly a JS object-literal `get k() {}`. */
 ScrJsval *scr_jsval_define_getter(ScrJsval *obj, ScrJsval *key, ScrJsval *fn) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSAtom k = JS_ValueToAtom(isl_ctx, key->v);
   JS_DefinePropertyGetSet(isl_ctx, obj->v, k, JS_DupValue(isl_ctx, fn->v), JS_UNDEFINED,
                           JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE);
@@ -2316,7 +2413,7 @@ ScrJsval *scr_jsval_define_getter(ScrJsval *obj, ScrJsval *key, ScrJsval *fn) {
 }
 
 ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue a = JS_NewArray(isl_ctx);
   for (int i = 0; i < n; i++) {
     JS_SetPropertyUint32(isl_ctx, a, (uint32_t)i, JS_DupValue(isl_ctx, elems[i]->v));
@@ -10097,7 +10194,7 @@ static void isl_free_boot(void) {
 
 /* The import boundary (libCall island.import). Borrows all args; +1 out. */
 ScrJsval *scr_jsval_import(const ScrStr *key, const ScrStr *name, const ScrStr *specifier) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_MODULE);
   const ScrIslandModule *m = isl_mod_find(key->data);
   if (!m || !isl_booted) {
     char buf[512];
@@ -10219,7 +10316,7 @@ static void isl_rejections_drop_reason(JSValueConst reason) {
 }
 
 ScrJsval *scr_jsval_import_dyn(const ScrStr *key) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_MODULE);
   if (!isl_booted) isl_modules_boot();
   JSValue promise = JS_LoadModule(isl_ctx, ISL_IMPORT_BASE, key->data);
   if (!JS_IsException(promise)) {
@@ -10290,7 +10387,7 @@ static void isl_exit_fail(const char *want, ScrJsval *v) {
 }
 
 int scr_jsval_exit_f64(ScrJsval *v, double *out) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (!JS_IsNumber(v->v)) {
     isl_exit_fail("number", v);
     return 0;
@@ -10299,7 +10396,7 @@ int scr_jsval_exit_f64(ScrJsval *v, double *out) {
 }
 
 int scr_jsval_exit_bool(ScrJsval *v, bool *out) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (!JS_IsBool(v->v)) {
     isl_exit_fail("boolean", v);
     return 0;
@@ -10309,7 +10406,7 @@ int scr_jsval_exit_bool(ScrJsval *v, bool *out) {
 }
 
 ScrStr *scr_jsval_exit_str(ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (!JS_IsString(v->v)) {
     isl_exit_fail("string", v);
     return NULL;
@@ -10323,7 +10420,7 @@ ScrStr *scr_jsval_exit_str(ScrJsval *v) {
  * fresh u8 bytes value, the boundary's aliasing stance. NULL = the
  * boundary TypeError was thrown (lying declaration). */
 ScrBytes *scr_jsval_exit_bytes(ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (JS_GetTypedArrayType(v->v) != JS_TYPED_ARRAY_UINT8) {
     isl_exit_fail("a Uint8Array", v);
     return NULL;
@@ -10350,7 +10447,7 @@ ScrBytes *scr_jsval_exit_bytes(ScrJsval *v) {
  * snapshot (the exit's aliasing stance: element IDENTITY crosses, the
  * spine is a copy). +1, or NULL with the exception pending. */
 ScrArr *scr_jsval_exit_jsval_arr(ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (JS_IsArray(v->v) <= 0) {
     isl_exit_fail("an array", v);
     return NULL;
@@ -10378,7 +10475,7 @@ ScrArr *scr_jsval_exit_jsval_arr(ScrJsval *v) {
  * JSON cannot represent (function, undefined, symbol at the top) comes
  * back undefined — refused here so the walker sees real JSON. */
 ScrStr *scr_jsval_to_json(ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   JSValue j = JS_JSONStringify(isl_ctx, v->v, JS_UNDEFINED, JS_UNDEFINED);
   if (JS_IsException(j)) { /* cyclic value, throwing toJSON, ... */
     isl_bridge_exception();
@@ -10399,17 +10496,17 @@ ScrStr *scr_jsval_to_json(ScrJsval *v) {
  * infallible. */
 
 bool scr_jsval_is_nullish(ScrJsval *v) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return JS_IsUndefined(v->v) || JS_IsNull(v->v);
 }
 
 ScrJsval *scr_jsval_undefined(void) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return isl_cell_new(JS_UNDEFINED);
 }
 
 ScrJsval *scr_jsval_null(void) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   return isl_cell_new(JS_NULL);
 }
 
@@ -10420,7 +10517,7 @@ ScrJsval *scr_jsval_null(void) {
  * crosses as an engine URL instance built from its href. */
 
 ScrJsval *scr_jsval_from_bytes(const ScrBytes *b) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   if (b->elem == SCR_BYTES_U8) {
     JSValue v = JS_NewUint8ArrayCopy(isl_ctx, b->data, b->len);
     if (JS_IsException(v)) {
@@ -10637,7 +10734,7 @@ static void isl_install_url_class(void) {
 }
 
 ScrJsval *scr_jsval_from_url(ScrUrl *u) {
-  isl_entry();
+  isl_entry(ISL_ENTRY_VALUE);
   isl_install_url_class();
   JSValue g = JS_GetGlobalObject(isl_ctx);
   JSValue ctor = JS_GetPropertyStr(isl_ctx, g, "URL");

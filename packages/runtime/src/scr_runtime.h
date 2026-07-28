@@ -3800,6 +3800,13 @@ long scr_promise_live_count(void);
  * reentrant from engine callbacks.
  */
 #ifdef SCR_DYNAMIC
+/* Opt-in runtime-path tracing. The emitted main calls this only for a
+ * dynamic program whose IR can reach the island, preserving dead-strip for
+ * fully static and island-free binaries. SCRIPTC_RUNTIME_TRACE must name an
+ * absolute output path; invalid/unwritable paths disable or drop the trace
+ * without changing program output or exit status. */
+void scr_island_trace_install(void);
+
 /* Evaluate UTF-8 source in the island's global scope; returns
  * String(result) as a +1 ScrStr. Borrows code. An island exception is
  * bridged into the exception cell as a catchable string ("TypeError:

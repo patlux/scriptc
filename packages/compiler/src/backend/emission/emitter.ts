@@ -33,7 +33,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesIsland, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -762,6 +762,10 @@ export class CEmitter {
       // both dispatch through them).
       ...streamVtStampLines(this),
       `  scr_lib_init(argc, argv);`,
+      // Opt-in runtime-path tracing is installed only when emitted code can
+      // actually enter the island. This keeps fully static and island-free
+      // --dynamic executables free of trace-only runtime linkage.
+      ...(moduleUsesIsland(this.mod) ? [`  scr_island_trace_install();`] : []),
       // Fetch-referencing programs register the native fetch bridge before any
       // island entry (the engine's lazy boot consults it): the ONLY
       // reference to scr_fetch.c, so fetch-free builds never compile or
