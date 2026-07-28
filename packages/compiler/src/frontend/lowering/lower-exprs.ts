@@ -746,9 +746,10 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         // semantics); the rest marker carries the trailing dyn-array ABI.
         const funcType: IrType = {
           kind: "func",
-          params: sig.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
+          params: sig.params.filter((p) => p.mode !== "dynRest" && p.mode !== "arguments").map((p) => p.type),
           ret: sig.returnType,
-          ...(sig.params.some((p) => p.mode === "dynRest") ? { rest: true as const } : {}),
+          ...(sig.params.some((p) => p.mode === "dynRest" || p.mode === "arguments") ? { rest: true as const } : {}),
+          ...(sig.params.some((p) => p.mode === "arguments") ? { restAbi: "allDyn" as const } : {}),
         };
         L.requireExactArityValue(expr, expr, sig.params, funcType);
         return { kind: "closure", fnName: sig.name, captures: [], type: funcType, loc };
@@ -5500,9 +5501,10 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         L.noteEdge(sig.name);
         const funcType: IrType = {
           kind: "func",
-          params: sig.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
+          params: sig.params.filter((p) => p.mode !== "dynRest" && p.mode !== "arguments").map((p) => p.type),
           ret: sig.returnType,
-          ...(sig.params.some((p) => p.mode === "dynRest") ? { rest: true as const } : {}),
+          ...(sig.params.some((p) => p.mode === "dynRest" || p.mode === "arguments") ? { rest: true as const } : {}),
+          ...(sig.params.some((p) => p.mode === "arguments") ? { restAbi: "allDyn" as const } : {}),
         };
         L.requireExactArityValue(prop, propName, sig.params, funcType);
         return { kind: "closure", fnName: sig.name, captures: [], type: funcType, loc };

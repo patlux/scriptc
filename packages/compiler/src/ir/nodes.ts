@@ -196,16 +196,15 @@ export type IrType =
    * as a Map VALUE (the per-hostname context cache) like child; fenced out
    * of array elements and JSON like the other opaque handles. */
   | { kind: "secureCtx" }
-  /** Heap, refcounted closure. `rest` marks a VARIADIC JS function (a
-   * `...args` rest parameter, or a zero-param function body reading
-   * `arguments` — test/common's mustCall wrapper): the lifted function
-   * takes one extra trailing `ScrDyn *` param — a dyn ARRAY carrying the
-   * call's arguments from index params.length on — which the dyn call
-   * thunk builds per call. `params` stays the DECLARED (non-rest) list
-   * (fn.length semantics). Rest-marked values are only ever CALLED
-   * through the dyn boundary (boxed thunks); direct static calls box
-   * first (lower-calls). */
-  | { kind: "func"; params: IrType[]; ret: IrType; rest?: true; restAbi?: "jsval" }
+  /** Heap, refcounted closure. `rest` marks a VARIADIC JS function. The
+   * lifted function takes one extra trailing array parameter. Plain rest
+   * packs call arguments from index params.length; `restAbi: "allDyn"`
+   * packs ALL arguments from index 0 for a body-owned `arguments` object,
+   * even when declared params exist. `restAbi: "jsval"` is the island
+   * engine-array ABI and spells its trailing slot in `params`; the dyn
+   * ABIs hide the trailing ScrDyn array from `params` (fn.length stays the
+   * declared count). Direct calls append the same pack the dyn thunk builds. */
+  | { kind: "func"; params: IrType[]; ret: IrType; rest?: true; restAbi?: "allDyn" | "jsval" }
   | { kind: "object"; className: string } // heap, refcounted class instance
   /** The class STATIC side as a value — `typeof C`, the type of the class
    * name itself and of `new (…) => T` constructor-typed slots. Runtime
@@ -542,7 +541,7 @@ export function typeKey(t: IrType): string {
     case "set":
       return `set<${typeKey(t.elem)}>`;
     case "func":
-      return `func(${[...t.params.map(typeKey), ...(t.rest ? [t.restAbi === "jsval" ? "...jsval[]" : "...dyn[]"] : [])].join(",")})=>${typeKey(t.ret)}`;
+      return `func(${[...t.params.map(typeKey), ...(t.rest ? [t.restAbi === "jsval" ? "...jsval[]" : t.restAbi === "allDyn" ? "...all-dyn[]" : "...dyn[]"] : [])].join(",")})=>${typeKey(t.ret)}`;
     case "object":
       return `object:${t.className}`;
     case "classval":
@@ -575,6 +574,7 @@ export function typeEquals(a: IrType, b: IrType): boolean {
       b.kind === "func" &&
       a.params.length === b.params.length &&
       (a.rest === true) === (b.rest === true) &&
+      a.restAbi === b.restAbi &&
       a.params.every((p, i) => typeEquals(p, b.params[i]!)) &&
       typeEquals(a.ret, b.ret)
     );
@@ -679,7 +679,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 2;
+  irVersion: 3;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions

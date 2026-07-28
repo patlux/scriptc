@@ -2659,8 +2659,9 @@ export class LlDyn {
         argNames.push(a);
       }
     });
-    // VARIADIC (rest-marked) signatures: one extra trailing dyn-array
-    // param carries the call's arguments from index params.length on.
+    // VARIADIC signatures: one extra trailing dyn array. Plain rest starts
+    // after the declared params; allDyn captures every actual argument for
+    // a body-owned `arguments` object.
     let rest: string | null = null;
     if (t.rest) {
       host.declare(`declare ptr @scr_dyn_new_arr()`);
@@ -2669,7 +2670,7 @@ export class LlDyn {
       B.line(`${rest} = call ptr @scr_dyn_new_arr()`);
       const riSlot = B.slot();
       B.entryAllocas.push(`${riSlot} = alloca i64`);
-      B.line(`store i64 ${t.params.length}, ptr ${riSlot}`);
+      B.line(`store i64 ${t.restAbi === "allDyn" ? 0 : t.params.length}, ptr ${riSlot}`);
       const lc = B.newLabel("dfk.rc");
       const lb = B.newLabel("dfk.rb");
       const le = B.newLabel("dfk.re");

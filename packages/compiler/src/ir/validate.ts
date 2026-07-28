@@ -1373,6 +1373,65 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     });
   }
   const globalsById = new Map((mod.globals ?? []).map((g) => [g.id, g]));
+  // Function-rest ABI markers are explicit type identity. Reject malformed
+  // spellings before backend helper interning can treat them as a real ABI.
+  const validateTypeAbi = (t: IrType, loc: SrcLoc, seen: Set<string>): void => {
+    switch (t.kind) {
+      case "func":
+        if (t.restAbi !== undefined && t.rest !== true) {
+          errors.push({ message: `func type has restAbi "${t.restAbi}" without rest`, loc });
+        }
+        t.params.forEach((p) => validateTypeAbi(p, loc, seen));
+        validateTypeAbi(t.ret, loc, seen);
+        return;
+      case "array":
+      case "set":
+        validateTypeAbi(t.elem, loc, seen);
+        return;
+      case "map":
+        validateTypeAbi(t.key, loc, seen);
+        validateTypeAbi(t.value, loc, seen);
+        return;
+      case "promise":
+        validateTypeAbi(t.inner, loc, seen);
+        return;
+      case "generator":
+        validateTypeAbi(t.yieldT, loc, seen);
+        validateTypeAbi(t.retT, loc, seen);
+        validateTypeAbi(t.nextT, loc, seen);
+        return;
+      case "record": {
+        const key = `r:${t.shapeId}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const rec = recordsById.get(t.shapeId);
+        if (rec?.indexValue) validateTypeAbi(rec.indexValue, loc, seen);
+        rec?.fields.forEach((f) => validateTypeAbi(f.type, loc, seen));
+        return;
+      }
+      case "union": {
+        const key = `u:${t.unionId}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        unionsById.get(t.unionId)?.arms.forEach((a) => validateTypeAbi(a, loc, seen));
+        return;
+      }
+      default:
+        return;
+    }
+  };
+  for (const g of mod.globals ?? []) validateTypeAbi(g.type, noLoc, new Set());
+  for (const r of mod.records ?? []) {
+    if (r.indexValue) validateTypeAbi(r.indexValue, noLoc, new Set());
+    r.fields.forEach((f) => validateTypeAbi(f.type, noLoc, new Set()));
+  }
+  for (const u of mod.unions ?? []) u.arms.forEach((a) => validateTypeAbi(a, noLoc, new Set()));
+  for (const cls of mod.classes ?? []) cls.fields.forEach((f) => validateTypeAbi(f.type, cls.loc, new Set()));
+  for (const fn of mod.functions) {
+    fn.params.forEach((p) => validateTypeAbi(p.type, fn.loc, new Set()));
+    fn.locals.forEach((l) => validateTypeAbi(l.type, fn.loc, new Set()));
+    validateTypeAbi(fn.returnType, fn.loc, new Set());
+  }
   // Every class an emitted type slot names as an OBJECT type must be
   // DECLARED: the emitter writes the class's own struct type and typed
   // retain/release calls for such slots, so an unregistered class there
@@ -2552,7 +2611,7 @@ function validateFunction(
           const wantRet = callSiteReturnType(target);
           // ISLAND-REST types (restAbi jsval) SPELL their trailing engine
           // array param — the lifted signature matches directly, no
-          // hidden slot.
+          // hidden slot. Plain and allDyn rest ABIs hide one dyn array.
           const hiddenRest = e.type.rest === true && e.type.restAbi !== "jsval";
           const declared = hiddenRest ? target.params.slice(0, -1) : target.params;
           const restOk =

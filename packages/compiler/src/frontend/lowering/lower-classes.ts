@@ -2835,9 +2835,10 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     L.noteEdge(fnName);
     const funcType: IrType = {
       kind: "func",
-      params: sig.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
+      params: sig.params.filter((p) => p.mode !== "dynRest" && p.mode !== "arguments").map((p) => p.type),
       ret: sig.ret,
-      ...(sig.params.some((p) => p.mode === "dynRest") ? { rest: true as const } : {}),
+      ...(sig.params.some((p) => p.mode === "dynRest" || p.mode === "arguments") ? { rest: true as const } : {}),
+      ...(sig.params.some((p) => p.mode === "arguments") ? { restAbi: "allDyn" as const } : {}),
     };
     L.requireExactArityValue(blame, blame, sig.params, funcType);
     return { kind: "closure", fnName, captures: [], type: funcType, loc };

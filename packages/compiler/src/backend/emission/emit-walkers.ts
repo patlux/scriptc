@@ -1654,13 +1654,13 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       }
       d.push(`  }`);
     });
-    // VARIADIC (rest-marked) signatures: one extra trailing dyn-array
-    // param carries the call's arguments from index params.length on —
-    // the mustCall wrapper's `arguments`, a JS `...args`. Built fresh per
-    // call (+1, moved into the callee like every param).
+    // VARIADIC signatures: one extra trailing dyn array. Plain rest starts
+    // after the declared params; allDyn captures every actual argument for
+    // a body-owned `arguments` object.
     if (t.rest) {
+      const restStart = t.restAbi === "allDyn" ? 0 : t.params.length;
       d.push(`  ScrDyn *rest = scr_dyn_new_arr();`);
-      d.push(`  for (size_t ri = ${t.params.length}; ri < argc; ri++) {`);
+      d.push(`  for (size_t ri = ${restStart}; ri < argc; ri++) {`);
       d.push(`    scr_dyn_arr_push(rest, scr_dyn_retain((ScrDyn *)args[ri]));`);
       d.push(`  }`);
     }

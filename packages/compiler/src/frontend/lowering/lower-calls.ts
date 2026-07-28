@@ -35,7 +35,7 @@ import { npmStaticPackageOfPath } from "../npm-static.js";
  * trailing-suffix call, and the frontend appends the interned undefined arm;
  * `rest` (always last) receives the surplus arguments packed into one array
  * literal at each call site. */
-export type ParamMode = "required" | "omittable" | "rest" | "dynRest" | "islandRest";
+export type ParamMode = "required" | "omittable" | "rest" | "dynRest" | "arguments" | "islandRest";
 
 /** One parameter of a signature, as call sites and callee prologues see it.
  * `type` is the ABI type — what the emitted C parameter carries: the
@@ -365,7 +365,7 @@ export interface GenericInstance {
       s !== undefined && !("kind" in s);
     const sources: readonly ArgSource[] =
       leading && leading.length > 0 ? [...leading.map((ir) => ({ ir })), ...argNodes] : argNodes;
-    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "islandRest");
+    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "arguments" || s.mode === "islandRest");
     const positional = restAt >= 0 ? shapes.slice(0, restAt) : [...shapes];
     const out: IrExpr[] = positional.map((shape, i) => {
       const src = sources[i];
@@ -409,11 +409,43 @@ export interface GenericInstance {
         return L.lowerExprExpecting(a, JSVAL);
       });
       out.push({ kind: "jsOp", op: "arrLit", args: elems, type: JSVAL, loc });
+    } else if (restAt >= 0 && shapes[restAt]!.mode === "arguments") {
+      // A declared-parameter function's body-owned `arguments` object:
+      // the hidden pack contains ALL actual call arguments from index 0.
+      // Fixed arguments lower once into hidden temps; the typed call slots
+      // read those temps and the pack boxes the same values. Surplus args
+      // then lower directly into the pack, preserving source order.
+      const elems: IrExpr[] = [];
+      for (let i = 0; i < sources.length; i++) {
+        const src = sources[i]!;
+        if (i < positional.length) {
+          const value = out[i]!;
+          const temp = L.declareHiddenLocal("%argument", value.type);
+          const ref = (): IrExpr => ({ kind: "varRef", localId: temp.id, type: value.type, loc });
+          out[i] = {
+            kind: "seqExpr",
+            stmts: [{ kind: "varDecl", localId: temp.id, init: value, loc }],
+            result: ref(),
+            type: value.type,
+            loc,
+          };
+          elems.push(L.coerceInto(blame, ref(), DYN));
+          continue;
+        }
+        if (isIr(src)) elems.push(L.coerceInto(blame, src.ir, DYN));
+        else {
+          if (ts.isSpreadElement(src)) {
+            L.unsupported("SC1090", src, "spread arguments into an 'arguments' capture");
+          }
+          elems.push(L.lowerExprExpecting(src, DYN));
+        }
+      }
+      out.push({ kind: "dynArrLit", elems, type: DYN, loc });
     } else if (restAt >= 0 && shapes[restAt]!.mode === "dynRest") {
       // The VARIADIC dyn pack (a JS `...args` with no static element
-      // type, or the synthetic `arguments` slot): surplus arguments
-      // convert through the dyn boundary into one fresh dyn array —
-      // exactly what the boxed call thunk builds for indirect calls.
+      // type, or a zero-param synthetic `arguments` slot): surplus
+      // arguments convert through the dyn boundary into one fresh dyn
+      // array — exactly what the boxed call thunk builds for indirect calls.
       const elems = sources.slice(restAt).map((a): IrExpr => {
         if (isIr(a)) return L.coerceInto(blame, a.ir, DYN);
         if (ts.isSpreadElement(a)) {
@@ -583,6 +615,7 @@ export interface GenericInstance {
         (s) =>
           s.mode === "required" ||
           s.mode === "dynRest" ||
+          s.mode === "arguments" ||
           s.mode === "islandRest" ||
           (s.mode === "omittable" && (s.type.kind === "dyn" || s.type.kind === "jsval")),
       )
@@ -873,24 +906,17 @@ export function collectSignatureInner(L: Lowerer, decl: ts.FunctionDeclaration):
     }
 
     const params = L.paramShapes(decl.parameters);
-    // The VARIADIC `arguments` form on a DECLARED function: same rule as
-    // lambdas (lambdaSignature) — zero declared params, the body reads
-    // `arguments`, a synthetic trailing dynRest shape carries the call's
-    // arguments (completeArgs packs direct calls; the boxed thunk packs
-    // indirect ones; lowerFunction declares the `arguments` local).
+    // A JS function's body-owned `arguments` object rides one hidden dyn
+    // array parameter. Zero-param functions keep the historic dynRest ABI
+    // (packing starts at params.length = 0); declared-parameter functions
+    // use the explicit all-arguments ABI so direct and dyn calls pack from
+    // index 0 while fn.length remains the declared parameter count.
     if (
       !params.some((sh) => sh.mode === "dynRest") &&
       isJsSourceFile(decl.getSourceFile()) &&
       bodyReadsArguments(decl)
     ) {
-      if (decl.parameters.length > 0) {
-        L.unsupported(
-          "SC1090",
-          decl,
-          "'arguments' in functions with declared parameters (use a rest parameter: (...args))",
-        );
-      }
-      params.push({ type: DYN, mode: "dynRest" });
+      params.push({ type: DYN, mode: decl.parameters.length > 0 ? "arguments" : "dynRest" });
     }
     const nameBlame: ts.Node = decl.name ?? decl;
     const returnType = L.declaredReturnType(decl, nameBlame);
@@ -1606,9 +1632,10 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       const inst = implicitDefaultInstance(L, ref, info);
       const funcType: IrType = {
         kind: "func",
-        params: inst.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
+        params: inst.params.filter((p) => p.mode !== "dynRest" && p.mode !== "arguments").map((p) => p.type),
         ret: inst.returnType,
-        ...(inst.params.some((p) => p.mode === "dynRest") ? { rest: true as const } : {}),
+        ...(inst.params.some((p) => p.mode === "dynRest" || p.mode === "arguments") ? { rest: true as const } : {}),
+        ...(inst.params.some((p) => p.mode === "arguments") ? { restAbi: "allDyn" as const } : {}),
       };
       L.requireExactArityValue(ref, ref, inst.params, funcType);
       L.noteEdge(inst.name);
@@ -1659,9 +1686,10 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     // list; the rest marker carries the trailing dyn-array ABI).
     const funcType: IrType = {
       kind: "func",
-      params: inst.params.filter((p) => p.mode !== "dynRest").map((p) => p.type),
+      params: inst.params.filter((p) => p.mode !== "dynRest" && p.mode !== "arguments").map((p) => p.type),
       ret: inst.returnType,
-      ...(inst.params.some((p) => p.mode === "dynRest") ? { rest: true as const } : {}),
+      ...(inst.params.some((p) => p.mode === "dynRest" || p.mode === "arguments") ? { rest: true as const } : {}),
+      ...(inst.params.some((p) => p.mode === "arguments") ? { restAbi: "allDyn" as const } : {}),
     };
     L.requireExactArityValue(ref, ref, inst.params, funcType);
     L.noteEdge(inst.name);
@@ -4269,11 +4297,11 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
 
 /** True when a spread argument lands where the compile-time completion
    * cannot take it — a FIXED parameter position, or a dynamic rest slot
-   * (dynRest/islandRest, whose packs are built per-argument): the shapes
+   * (dynRest/arguments/islandRest, whose packs are built per-argument): the shapes
    * the runtime-arity lane (lowerSpreadArgsCall) serves. Typed `rest`
    * slots keep completeArgs' same-element spread packing. */
   export function spreadNeedsRuntimeArity(shapes: readonly ParamShape[], argNodes: readonly ts.Expression[]): boolean {
-    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "islandRest");
+    const restAt = shapes.findIndex((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "arguments" || s.mode === "islandRest");
     return argNodes.some(
       (a, i) =>
         ts.isSpreadElement(a) && (restAt < 0 || i < restAt || shapes[restAt]!.mode !== "rest"),
@@ -5295,25 +5323,20 @@ const inliningPredicates = new Set<ts.Symbol>();
       !ts.isArrowFunction(node) &&
       isJsSourceFile(node.getSourceFile()) &&
       bodyReadsArguments(node);
-    if (usesArguments && node.parameters.length > 0) {
-      L.unsupported(
-        "SC1090",
-        node,
-        "'arguments' in functions with declared parameters (use a rest parameter: (...args))",
-      );
+    if (usesArguments) {
+      shapes.push({ type: DYN, mode: node.parameters.length > 0 ? "arguments" : "dynRest" });
     }
+    const capturesAllArguments = shapes.some((s) => s.mode === "arguments");
     return {
       shapes,
       funcType: {
         kind: "func",
-        // dynRest is EXCLUDED (the boxed thunk fills the trailing dyn
-        // array — no spelled slot); islandRest is INCLUDED (the trailing
-        // jsval param IS the engine arguments array, the REST host-call
-        // adapter's one uniform shape).
-        params: shapes.filter((s) => s.mode !== "dynRest").map((s) => s.type),
+        // Hidden dynRest/arguments slots stay out of the value type's
+        // declared params; islandRest spells its engine-array slot.
+        params: shapes.filter((s) => s.mode !== "dynRest" && s.mode !== "arguments").map((s) => s.type),
         ret,
         ...(hasDynRest || usesArguments || hasIslandRest ? { rest: true as const } : {}),
-        ...(hasIslandRest ? { restAbi: "jsval" as const } : {}),
+        ...(capturesAllArguments ? { restAbi: "allDyn" as const } : hasIslandRest ? { restAbi: "jsval" as const } : {}),
       },
     };
   }
@@ -5402,7 +5425,11 @@ const inliningPredicates = new Set<ts.Symbol>();
       // The VARIADIC `arguments` form (rest-marked with no declared rest
       // param): a synthetic trailing dyn-array param carries the call's
       // arguments; `arguments` reads resolve to it (identifier lowering).
-      if (funcType.rest && !shapes.some((s) => s.mode === "dynRest" || s.mode === "islandRest")) {
+      if (
+        funcType.rest &&
+        shapes.length > node.parameters.length &&
+        (shapes[shapes.length - 1]!.mode === "dynRest" || shapes[shapes.length - 1]!.mode === "arguments")
+      ) {
         const argsLocal = L.declareHiddenLocal("%arguments", DYN);
         params.push({ localId: argsLocal.id, name: "%arguments", type: DYN });
         fnCtx.argumentsLocal = argsLocal;
@@ -7519,7 +7546,10 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
       // The synthetic `arguments` slot (a dynRest shape BEYOND the declared
       // parameters — collectSignatureInner appended it): one trailing
       // dyn-array param, resolved by `arguments` reads.
-      if (sig.params.length > decl.parameters.length && sig.params[sig.params.length - 1]!.mode === "dynRest") {
+      if (
+        sig.params.length > decl.parameters.length &&
+        (sig.params[sig.params.length - 1]!.mode === "dynRest" || sig.params[sig.params.length - 1]!.mode === "arguments")
+      ) {
         const argsLocal = L.declareHiddenLocal("%arguments", DYN);
         params.push({ localId: argsLocal.id, name: "%arguments", type: DYN });
         ctx.argumentsLocal = argsLocal;

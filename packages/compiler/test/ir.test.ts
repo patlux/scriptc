@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
-import { BOOL, F64, type IrModule } from "../src/ir/nodes.js";
+import { BOOL, F64, STRING, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
 
 test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
@@ -13,10 +13,25 @@ test("fib module JSON round-trips", () => {
   expect(deserializeModule(json)).toEqual(fibModule);
 });
 
+test("all-arguments capture is part of function type identity and serialization", () => {
+  const plain: IrType = { kind: "func", params: [STRING], ret: F64, rest: true };
+  const all: IrType = { kind: "func", params: [STRING], ret: F64, rest: true, restAbi: "allDyn" };
+  expect(typeKey(plain)).not.toBe(typeKey(all));
+  expect(typeEquals(plain, all)).toBe(false);
+
+  const mod = structuredClone(fibModule);
+  mod.globals = [{ id: "%g.capture", name: "capture", type: all, mutable: false }];
+  expect(deserializeModule(serializeModule(mod)).globals?.[0]?.type).toEqual(all);
+
+  const malformed = structuredClone(fibModule);
+  malformed.globals = [{ id: "%g.bad", name: "bad", type: { kind: "func", params: [], ret: F64, restAbi: "allDyn" }, mutable: false }];
+  expect(validateModule(malformed).map((e) => e.message)).toContain('func type has restAbi "allDyn" without rest');
+});
+
 test("validator rejects type mismatches and bad references", () => {
   const loc = { file: "t.ts", start: 0, end: 0 };
   const bad: IrModule = {
-    irVersion: 2,
+    irVersion: 3,
     sourceFile: "t.ts",
     entry: "__main",
     functions: [
@@ -77,6 +92,6 @@ test("serializer round-trips ±Infinity and refuses NaN", () => {
 });
 
 test("deserializer enforces IR version", () => {
-  const json = serializeModule(fibModule).replace('"irVersion": 2', '"irVersion": 99');
+  const json = serializeModule(fibModule).replace('"irVersion": 3', '"irVersion": 99');
   expect(() => deserializeModule(json)).toThrow(/version mismatch/);
 });
