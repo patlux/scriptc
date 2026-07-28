@@ -9528,6 +9528,10 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     // never-tainted JS chain — `cmd[1].length` on `const cmd = ['pwd',
     // []]`, where the element read stayed a dyn node): read through the
     // dyn keyed read like the unmappable-receiver path below the chain.
+    // The island twin applies when one union arm already crossed into the
+    // engine (`parsed.error.message` on a Result whose Error payload is an
+    // island handle): preserve that handle and perform the property read
+    // in the engine instead of inventing a static union representation.
     if (value.type.kind === "dyn") {
       const key: IrExpr = { kind: "strLit", value: expr.name.text, type: STRING, loc: locOf(expr.name) };
       return { kind: "dynKeyGet", key, value, type: DYN, loc: locOf(expr) };
@@ -9560,6 +9564,16 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         };
       }
       return null;
+    }
+    if (value.type.kind === "jsval") {
+      return {
+        kind: "jsOp",
+        op: "getProp",
+        name: expr.name.text,
+        args: [value],
+        type: JSVAL,
+        loc: locOf(expr),
+      };
     }
     if (value.type.kind !== "union") {
       throw new Error("lowerer bug: union-typed receiver lowered to a non-union");
