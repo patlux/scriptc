@@ -130,8 +130,8 @@ interface LlScopeEntry {
   boxed?: boolean;
 }
 
-export function emitLlvmModule(mod: IrModule): string {
-  return new LlEmitter(mod).emit();
+export function emitLlvmModule(mod: IrModule, dynamic = false): string {
+  return new LlEmitter(mod, dynamic).emit();
 }
 
 /** Exact double literal: LLVM's 16-digit hex form round-trips every f64
@@ -978,7 +978,10 @@ class LlEmitter {
   private readonly chainSlots = new Map<string, LlValue>();
   private logArgSlots = 0;
 
-  constructor(private readonly mod: IrModule) {
+  constructor(
+    private readonly mod: IrModule,
+    private readonly dynamic = false,
+  ) {
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) this.ffiByName.set(entry.name, entry);
     const mt = computeMayThrow(mod);
@@ -1192,6 +1195,7 @@ class LlEmitter {
     }
     if (usesHttp) this.declare(`declare void @scr_http_dyn_install()`);
     if (usesFetch) this.declare(`declare void @scr_fetch_install()`);
+    if (this.dynamic) this.declare(`declare void @scr_island_trace_install()`);
     if (usesEvents && hasRefGlobals) {
       this.declare(`declare void @scr_run_exit_listeners(double)`);
       this.declare(`declare i32 @scr_exit_code_hint_get()`);
@@ -1453,6 +1457,9 @@ class LlEmitter {
       ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),
       ...(usesStream ? [`  call void @scr_stream_install()`] : []),
       `  call void @scr_lib_init(i32 %argc, ptr %argv)`,
+      // Every --dynamic executable reports zero entries when it never boots
+      // QuickJS; static emission omits the declaration and call entirely.
+      ...(this.dynamic ? [`  call void @scr_island_trace_install()`] : []),
       `  call void @${mangleFunction(this.mod.entry)}()`,
       // Uncaught exception from top-level code: Node exits 1.
       ...(entryMayThrow

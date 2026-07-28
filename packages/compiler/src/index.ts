@@ -688,7 +688,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   let llvmRefusal: string | undefined;
   if (opts.backend !== "c") {
     try {
-      const ll = emitLlvmModule(lowered.module!);
+      const ll = emitLlvmModule(lowered.module!, opts.dynamic ?? false);
       cPath = join(opts.outDir, `${stem}.ll`);
       await writeFile(cPath, ll);
       backend = "llvm";
@@ -703,7 +703,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
   }
   if (backend === "c") {
-    await writeFile(cPath, emitModule(lowered.module!, entryText));
+    await writeFile(cPath, emitModule(lowered.module!, entryText, opts.dynamic ?? false));
   }
   // Kept-TU honesty: outDir persists across builds (the CLI's .scriptc/),
   // so a lane change would leave the PREVIOUS lane's TU beside the fresh

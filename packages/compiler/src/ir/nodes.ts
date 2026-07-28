@@ -5476,35 +5476,6 @@ export function canExitIslandToType(
   return false;
 }
 
-/** True when emitted code can enter the dynamic island. This is narrower
- * than the build's --dynamic switch: an island-free dynamic binary should
- * still dead-strip the engine/runtime and must not gain trace-only weight.
- * Embedded modules always enter through island.import; direct island/jsOp/
- * jsMarshal/jsExit nodes cover the non-npm dynamic surface. */
-export function moduleUsesIsland(mod: IrModule): boolean {
-  if ((mod.embedded?.modules.length ?? 0) > 0) return true;
-  let found = false;
-  const visit = (v: unknown): void => {
-    if (found || v === null || typeof v !== "object") return;
-    if (Array.isArray(v)) {
-      for (const item of v) visit(item);
-      return;
-    }
-    const node = v as { kind?: unknown; fn?: unknown };
-    if (
-      node.kind === "jsOp" || node.kind === "jsMarshal" ||
-      node.kind === "jsExit" || node.kind === "dynFromJsval" ||
-      (node.kind === "libCall" && typeof node.fn === "string" && node.fn.startsWith("island."))
-    ) {
-      found = true;
-      return;
-    }
-    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
-  };
-  visit(mod);
-  return found;
-}
-
 /** True when the module contains any regex construct — a regexLit /
  * regexIntrinsic node or a regex-typed slot anywhere. This is the link
  * switch that pulls scr_regex.c + the vendored libregexp into the binary
