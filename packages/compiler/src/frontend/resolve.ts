@@ -676,9 +676,11 @@ function packageAnswer(pkgDir: string, fallbackName: string, typesFile: string):
 export function resolveBareModule(
   fromFile: string,
   specifier: string,
-  /** "js-only" forces the runtime-JS resolution regardless of the active
-   * --npm-static set (the auto-detection probe); default follows the set. */
-  mode?: "js-only",
+  /** "js-only" forces runtime-JS resolution regardless of the active
+   * --npm-static set (the auto-detection probe); "types-only" recovers the
+   * declaration surface hidden by an active opt-in for narrow admission
+   * checks; default follows the set. */
+  mode?: "js-only" | "types-only",
 ): BareResolution | null {
   const pkgName = packagePrefixOf(specifier);
   const rest = specifier.slice(pkgName.length).replace(/^\//, "");
@@ -686,7 +688,7 @@ export function resolveBareModule(
   // An opted-in --npm-static package resolves to its RUNTIME JS: the js
   // pass only, the "types" export condition dropped, the @types mangling
   // never consulted — mirroring the shadowed world the tsgo host serves.
-  const npmStatic = mode === "js-only" || isNpmStaticPackage(pkgName);
+  const npmStatic = mode === "js-only" || (mode !== "types-only" && isNpmStaticPackage(pkgName));
   const conditions = npmStatic ? JS_ONLY_CONDITIONS : EXPORT_CONDITIONS;
 
   const inPackage = (nmPkgDir: string, name: string, pass: NmPass): BareResolution | null => {
@@ -770,7 +772,11 @@ export function resolveBareModule(
     }
   };
 
-  return npmStatic ? passOnce("js") : (passOnce("types") ?? passOnce("js"));
+  return mode === "types-only"
+    ? passOnce("types")
+    : npmStatic
+      ? passOnce("js")
+      : (passOnce("types") ?? passOnce("js"));
 }
 
 /** Resolves a `/// <reference types="name" />`-style TYPE DIRECTIVE the way

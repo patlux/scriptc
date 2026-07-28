@@ -51,7 +51,7 @@ import {
 } from "../diagnostics/diagnostic.js";
 import { isNodeModulesPath, nearestPkgJsonPath, projectDtsRuntimeSibling, resolveBareModule, resolveProjectImport, resolveRelativeModule, resolveTypeDirective, setProjectRealm } from "./resolve.js";
 import { probeNodeImportRefusal, probeNodeRequireRefusal } from "./npm.js";
-import { isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
+import { isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, npmStaticPackages, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
 import { provenanceEntryFor, provenancePaths } from "./provenance-registry.js";
 import { cjsLexerVisibleNames } from "./cjs-lexer.js";
 import {
@@ -220,9 +220,24 @@ function loadProgram7(host: ts.Ts7Host, entryPath: string): LoadResult & { dispo
   let options: ts.Ts7CompilerOptions = nodeTypes ? { ...config.options, skipLibCheck: true } : { ...config.options };
   // --npm-static: opted-in packages' shipped JS must be TYPE-INCLUDED (not
   // just resolved) — without maxNodeModuleJsDepth, node_modules JS types as
-  // an implicit-any module (TS7016) and nothing infers. Only flagged
+  // an implicit-any module (TS7016) and nothing infers. The bound is a
+  // recursion cap over EXTERNAL import edges, not package membership: a
+  // composition root can traverse many opted-in packages before reaching
+  // one of their entries. Use a deliberately high safety ceiling so graph
+  // reachability, rather than the user's literal entry/import shape,
+  // decides which opted-in files join the checked program. Only flagged
   // compiles pay this; flagless builds keep the exact historical options.
-  if (npmStaticActive()) options.maxNodeModuleJsDepth = 4;
+  if (npmStaticActive()) {
+    options.maxNodeModuleJsDepth = 64;
+    // A deep opted-in graph also pulls in declarations of non-opted island
+    // dependencies. Their INTERNAL consistency against scriptc's fixed lib
+    // is not an admission verdict (and used to trigger the generic
+    // inferred-surface package fallback); consumer use sites are still
+    // checked against those declarations. This is the same skipLibCheck
+    // discipline already applied when @types/node is present, extended to
+    // npm-static's declaration-rich composition roots.
+    options.skipLibCheck = true;
+  }
   // --provenance-sources: the registered entries become tsconfig "paths"
   // so tsgo's OWN resolution of the bare specifiers lands on the same
   // source files the preflight resolver answers — the checker types the
@@ -1198,6 +1213,61 @@ function locOf7(node: ts.Node): { file: string; start: number; end: number } {
   return { file: sf.fileName, start: node.getStart(sf), end: node.getEnd() };
 }
 
+/** True for the narrow checker gap caused by dropping an opted-in
+ * package's declaration type predicate: `isThing(value)` no longer narrows
+ * the following branch, so TS18046 anchors at a property read of that
+ * still-unknown value. The JS body remains the executable truth; lowering
+ * keeps the value in checked-dynamic form, so every typed exit validates
+ * at the exact use site instead of trusting the lost declaration claim.
+ * Suppress only when the containing branch is guarded by a call to an
+ * opted-in package export — ordinary unknown reads,
+ * local boolean helpers, and non-opted package guards keep tsc's error. */
+function declarationHasTypePredicate(typesFile: string, exportName: string): boolean {
+  let text: string;
+  try {
+    text = ts.sys.readFile(typesFile) ?? "";
+  } catch {
+    return false;
+  }
+  // Declaration spellings are intentionally narrow: a named function
+  // export whose return annotation is a type predicate. Complex alias
+  // chains and predicate-typed consts keep the package fallback until a
+  // similarly precise attribution exists.
+  const escaped = exportName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b(?:export\\s+)?(?:declare\\s+)?function\\s+${escaped}\\s*\\([^)]*\\)\\s*:\\s*[^;{]+\\bis\\b`).test(text);
+}
+
+function npmStaticLostTypeGuardDiag(program: ts.Program, d: ts.Diagnostic): boolean {
+  if (d.code !== 18046 || d.fileName === undefined) return false;
+  const sf = program.getSourceFile(d.fileName);
+  if (sf === undefined) return false;
+  let node = ts.getTokenAtPosition(sf, d.pos);
+  for (; node !== sf; node = node.parent) {
+    if (!ts.isIfStatement(node)) continue;
+    const guard = node.expression;
+    if (!ts.isCallExpression(guard)) return false;
+    const callee = guard.expression;
+    if (!ts.isIdentifier(callee)) return false;
+    const sym = program.getTypeChecker().getSymbolAtLocation(callee);
+    if (sym === undefined) return false;
+    const decls = program.getTypeChecker().declarationsOf(sym);
+    for (const decl of decls) {
+      if (!ts.isImportSpecifier(decl)) continue;
+      const importDecl = decl.parent.parent.parent;
+      if (!ts.isImportDeclaration(importDecl) || !ts.isStringLiteral(importDecl.moduleSpecifier)) continue;
+      const spec = importDecl.moduleSpecifier.text;
+      if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
+      const npm = resolveBareModule(sf.fileName, spec);
+      if (npm === null || !npmStaticPackages().has(npm.packageName)) continue;
+      const declared = resolveBareModule(sf.fileName, spec, "types-only");
+      const exportName = decl.propertyName?.text ?? decl.name.text;
+      if (declared !== null && declarationHasTypePredicate(declared.typesFile, exportName)) return true;
+    }
+    return false;
+  }
+  return false;
+}
+
 /** The PROGRAM source file an opted-in --npm-static package's resolved
  * entry maps to, or null with the package marked an offender (resolution
  * still answering declarations, or the file missing from the type-checked
@@ -1469,6 +1539,7 @@ function preflight7(load: LoadResult): {
         !npmStaticFileSuppressed(d) &&
         !nodeModulesJsSuppressed(d) &&
         !namespaceCalleeSuppressed(p, d) &&
+        !npmStaticLostTypeGuardDiag(p, d) &&
         !workspaceImplicitAnySuppressed(p, d) &&
         !jsdocTypeSuppressed(p, d, commentDup),
     );
