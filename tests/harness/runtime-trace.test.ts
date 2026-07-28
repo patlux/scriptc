@@ -100,6 +100,7 @@ for (const requestedBackend of ["c", "default"] as const) {
 
     test("writes schema v1 JSON with stable reason counts", async () => {
       const built = await build("enabled", islandSource, true, requestedBackend);
+      if (requestedBackend === "default") expect(built.backend).toBe("llvm");
       const tracePath = join(cacheDir, `enabled-${requestedBackend}-${process.pid}-${sanitize ? "san" : "plain"}.json`);
       rmSync(tracePath, { force: true });
       const result = await run(built.binaryPath, tracePath);
