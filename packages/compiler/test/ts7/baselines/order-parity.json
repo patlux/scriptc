@@ -5312,10 +5312,22 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2649-recursive-checked-dynamic-return.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2649-recursive-checked-dynamic-return.cjs"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2650-json-catalog/main.ts": {
    "order": [
     "<repo>/tests/corpus/2650-json-catalog/shared.ts",
     "<repo>/tests/corpus/2650-json-catalog/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2650-string-island-call-boundary.ts": {
+   "order": [
+    "<repo>/tests/corpus/2650-string-island-call-boundary.ts"
    ],
    "diags": []
   },
