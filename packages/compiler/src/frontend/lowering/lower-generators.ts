@@ -15,6 +15,33 @@ import { forOfVarTarget } from "./lower-stmts.js";
 
 type GenType = IrType & { kind: "generator" };
 
+/** A program class's proven async-iterator opener: zero arguments, native
+ * generator result. Ordinary iterator objects remain fenced—the generator
+ * handle is the only protocol representation with sound throw/return
+ * completion and ownership on both backends. */
+export function asyncGeneratorIterableOf(L: Lowerer, t: IrType): { className: string; iterT: GenType } | null {
+  if (t.kind !== "object") return null;
+  const info = L.classes.get(t.className);
+  if (!info) return null;
+  const iter = L.findMethodOn(info, "sym:asyncIterator");
+  if (!iter || iter.sig.abstract === true || iter.sig.params.length !== 0 || iter.sig.ret.kind !== "generator") return null;
+  return { className: t.className, iterT: iter.sig.ret };
+}
+
+/** Open a concrete async-generator iterable at an erased AsyncIterable slot. */
+export function asyncIterableGeneratorAdapter(L: Lowerer, src: IrExpr, expected: GenType): IrExpr | null {
+  const info = asyncGeneratorIterableOf(L, src.type);
+  if (!info || !typeEquals(info.iterT, expected)) return null;
+  return L.accessorCall(info.className, "sym:asyncIterator", src, [], info.iterT, src.loc);
+}
+
+export function lowerAsyncIterableReturn(L: Lowerer, node: ts.Expression, expected: GenType): IrExpr | null {
+  const mapped = L.mapTypeOf(L.typeOf(node));
+  if (mapped?.kind !== "object" || !asyncGeneratorIterableOf(L, mapped)) return null;
+  const adapted = asyncIterableGeneratorAdapter(L, L.lowerExpr(node), expected);
+  return adapted ? L.coerceInto(node, adapted, expected) : null;
+}
+
 /** The interned IteratorResult record of a generator type (never null for
  * a MAPPED generator — mapType required it to intern). */
 function resultRecordOf(L: Lowerer, genT: GenType): IrType & { kind: "record" } {
@@ -277,22 +304,11 @@ export function lowerForOfGenerator(
       : L.declareLocal(decl.name, decl.name.text, genT.yieldT, isLet);
     const xRef: IrExpr = { kind: "varRef", localId: x.id, type: genT.yieldT, loc };
     const nextResume: IrExpr = { kind: "genResume", mode: "next", gen: gRef(), arg: null, type: recT, loc };
-    const asyncHop = (value: IrExpr): IrExpr => {
-      if (!asyncIteration) return value;
-      const promiseT: IrType = { kind: "promise", inner: value.type };
-      return {
-        kind: "awaitExpr",
-        value: {
-          kind: "intrinsic",
-          name: "promise.resolve",
-          args: [value],
-          type: promiseT,
-          loc,
-        },
-        type: value.type,
-        loc,
-      };
-    };
+    // genResume already drives native async-generator await points to the
+    // next yield/completion. No synthetic Promise.resolve/await hop belongs
+    // here; adding one creates a nested scheduler checkpoint inside the
+    // consumer fiber and corrupts its return context on abrupt close.
+    const asyncHop = (value: IrExpr): IrExpr => value;
     const head: IrStmt[] = [
       {
         kind: "varDecl",
@@ -323,6 +339,30 @@ export function lowerForOfGenerator(
         : []),
     ];
     const body = L.inCtl("loop", () => L.lowerScopedBlock(stmt.statement), labels);
+    const close: IrStmt[] = [
+      {
+        kind: "exprStmt",
+        // Native async generators synchronously drive their await points
+        // inside genResume; no second await hop belongs on IteratorClose.
+        expr: { kind: "genResume", mode: "return", gen: gRef(), arg: null, type: recT, loc },
+        loc,
+      },
+    ];
+    const loopBody: IrStmt[] = asyncIteration
+      ? [
+          head[0]!, // next(): outside the protected body; a next throw never closes
+          head[1]!, // exhaustion: done=true + break; normal path skips close
+          {
+            kind: "tryCatch",
+            tryBody: [...head.slice(2), ...body],
+            catchBody: null,
+            catchLocalId: null,
+            finallyBody: close,
+            finallyMode: "iterator",
+            loc,
+          },
+        ]
+      : [...head, ...body];
     return {
       kind: "block",
       body: [
@@ -331,31 +371,27 @@ export function lowerForOfGenerator(
         {
           kind: "while",
           cond: { kind: "boolLit", value: true, type: BOOL, loc },
-          body: [...head, ...body],
+          body: loopBody,
           ...(labels && { labels }),
           loc,
         },
-        // IteratorClose: an early exit (break) closes the generator —
-        // finallys run; the .return() result record is dropped.
-        {
-          kind: "if",
-          cond: {
-            kind: "unary",
-            op: "!",
-            operand: { kind: "varRef", localId: done.id, type: BOOL, loc },
-            type: BOOL,
-            loc,
-          },
-          then: [
-            {
-              kind: "exprStmt",
-              expr: asyncHop({ kind: "genResume", mode: "return", gen: gRef(), arg: null, type: recT, loc }),
-              loc,
-            },
-          ],
-          else_: null,
-          loc,
-        },
+        ...(!asyncIteration
+          ? [
+              {
+                kind: "if",
+                cond: {
+                  kind: "unary",
+                  op: "!",
+                  operand: { kind: "varRef", localId: done.id, type: BOOL, loc },
+                  type: BOOL,
+                  loc,
+                },
+                then: close,
+                else_: null,
+                loc,
+              } satisfies IrStmt,
+            ]
+          : []),
       ],
       loc,
     };

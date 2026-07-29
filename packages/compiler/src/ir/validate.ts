@@ -5075,7 +5075,9 @@ function validateFunction(
           }
         }
         const guarded = s.finallyBody !== null;
-        if (guarded) finallyRegions.push({ loopDepth, breakableDepth, labelLen: labelTargets.length });
+        const iteratorFinally = s.finallyMode === "iterator";
+        if (s.finallyMode !== undefined && !guarded) err(`tryCatch finallyMode without finally body`, s.loc);
+        if (guarded && !iteratorFinally) finallyRegions.push({ loopDepth, breakableDepth, labelLen: labelTargets.length });
         checkStmts(s.tryBody);
         if (s.catchBody) checkStmts(s.catchBody);
         if (s.finallyBody) {
@@ -5083,7 +5085,7 @@ function validateFunction(
           checkStmts(s.finallyBody);
           finallyBlockDepth--;
         }
-        if (guarded) finallyRegions.pop();
+        if (guarded && !iteratorFinally) finallyRegions.pop();
         break;
       }
       case "break": {

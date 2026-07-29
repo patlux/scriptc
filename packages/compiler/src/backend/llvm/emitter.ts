@@ -960,7 +960,7 @@ class LlEmitter {
    * (past its own catch), so the copies emit under the truncated stack.
    * break/continue never cross a finally (frontend fence + validator
    * backstop), so return and the two tryCatch paths are the only copies. */
-  private finallyStack: { frameDepth: number; scopeDepth: number; tryDepth: number; body: IrStmt[] }[] = [];
+  private finallyStack: { frameDepth: number; scopeDepth: number; tryDepth: number; targetDepth: number; body: IrStmt[]; mode?: "iterator" }[] = [];
   /** Enclosing try contexts, innermost last — the compile-time unwind
    * targets (CEmitter.tryStack): a pending check or `throw` inside a try
    * releases frames/scopes down to the recorded depths and branches to
@@ -3434,6 +3434,10 @@ class LlEmitter {
           }
         }
         if (!target) throw new Error("llvm emitter bug: break target not found");
+        const targetIndex = this.jumpTargets.indexOf(target);
+        const fins = this.finallyStack.filter((f) => f.mode === "iterator" && targetIndex < f.targetDepth).reverse();
+        if (fins.length > 0) this.emitIteratorJumpFinallys(fins);
+        if (B.isTerminated()) break;
         this.releaseForJump(target.frameDepth, target.scopeDepth);
         B.terminate(`br label %${target.brkLabel}`);
         break;
@@ -3450,6 +3454,10 @@ class LlEmitter {
           }
         }
         if (!target || target.contLabel === null) throw new Error("llvm emitter bug: continue target not found");
+        const targetIndex = this.jumpTargets.indexOf(target);
+        const fins = this.finallyStack.filter((f) => f.mode === "iterator" && targetIndex < f.targetDepth).reverse();
+        if (fins.length > 0) this.emitIteratorJumpFinallys(fins);
+        if (B.isTerminated()) break;
         this.releaseForJump(target.frameDepth, target.scopeDepth);
         B.terminate(`br label %${target.contLabel}`);
         break;
@@ -3556,6 +3564,27 @@ class LlEmitter {
     }
   }
 
+  private emitIteratorJumpFinallys(fins: (typeof this.finallyStack)[number][]): void {
+    const savedFrames = this.frames;
+    const savedScopes = this.scopes;
+    const savedFinally = this.finallyStack;
+    const savedTry = this.tryStack;
+    for (const fin of fins) {
+      const idx = savedFinally.lastIndexOf(fin);
+      this.releaseForJump(fin.frameDepth, fin.scopeDepth);
+      this.frames = savedFrames.slice(0, fin.frameDepth);
+      this.scopes = savedScopes.slice(0, fin.scopeDepth);
+      this.finallyStack = savedFinally.slice(0, idx);
+      this.tryStack = savedTry.slice(0, fin.tryDepth);
+      this.emitBlock(fin.body);
+      if (this.B.isTerminated()) break;
+    }
+    this.frames = savedFrames;
+    this.scopes = savedScopes;
+    this.finallyStack = savedFinally;
+    this.tryStack = savedTry;
+  }
+
   /** try/catch/finally via pending-flag unwinding — emit-stmts.ts's
    * emitTryCatch, block-flavored. Entering a try emits NO code: the try
    * context is compile-time state (tryStack) redirecting unwinds inside
@@ -3600,7 +3629,9 @@ class LlEmitter {
         frameDepth: this.frames.length,
         scopeDepth: this.scopes.length,
         tryDepth: this.tryStack.length,
+        targetDepth: this.jumpTargets.length,
         body: s.finallyBody!,
+        ...(s.finallyMode !== undefined && { mode: s.finallyMode }),
       });
     }
     this.tryStack.push(handler);
@@ -3660,7 +3691,7 @@ class LlEmitter {
 
     if (hasFinally) {
       B.startBlock(afterTryLabel);
-      this.emitBlock(s.finallyBody!); // normal path
+      if (s.finallyMode !== "iterator") this.emitBlock(s.finallyBody!); // normal path
       B.br(endLabel);
       if (excHandler.used) {
         // The pending exception is STASHED across the finally body (a
@@ -3678,11 +3709,24 @@ class LlEmitter {
         B.line(`${stash} = call ptr @scr_exc_take() ; stash across finally`);
         B.line(`store ptr ${stash}, ptr ${stashSlot}`);
         this.scopes.push([{ slot: stashSlot, type: CAUGHT }]);
+        const suppress = s.finallyMode === "iterator"
+          ? { label: B.newLabel("try.fs"), used: false, frameDepth: this.frames.length, scopeDepth: this.scopes.length }
+          : null;
+        if (suppress) this.tryStack.push(suppress);
         this.emitBlock(s.finallyBody!);
+        if (suppress) this.tryStack.pop();
         this.scopes.pop(); // normal completion keeps the stash for the re-raise
         B.line(`call void @scr_rethrow(ptr ${stash})`);
         B.line(`call void @scr_caught_release(ptr ${stash})`);
         this.emitUnwind();
+        if (suppress?.used) {
+          B.startBlock(suppress.label);
+          this.declare(`declare void @scr_exc_clear()`);
+          B.line(`call void @scr_exc_clear() ; suppress close error`);
+          B.line(`call void @scr_rethrow(ptr ${stash})`);
+          B.line(`call void @scr_caught_release(ptr ${stash})`);
+          this.emitUnwind();
+        }
       }
       B.startBlock(endLabel);
     } else {

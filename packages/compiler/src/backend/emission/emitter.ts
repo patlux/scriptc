@@ -34,6 +34,11 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+
+type JumpTarget =
+  | { kind: "loop"; continueLabel: string | null; usedContinue: boolean; endLabel: string | null; usedEnd: boolean; labels?: string[]; scopeDepth: number; frameDepth: number }
+  | { kind: "switch"; endLabel: string; usedEnd: boolean; labels?: string[]; scopeDepth: number; frameDepth: number }
+  | { kind: "block"; endLabel: string; usedEnd: boolean; labels: string[]; scopeDepth: number; frameDepth: number };
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -250,20 +255,7 @@ export class CEmitter {
    * most notably), whose normal end-of-statement releases sit on the
    * fall-through path the jump bypasses — the jump releases every frame
    * pushed after the target's own before jumping. */
-  jumpTargets: (
-    | {
-        kind: "loop";
-        continueLabel: string | null;
-        usedContinue: boolean;
-        endLabel: string | null;
-        usedEnd: boolean;
-        labels?: string[];
-        scopeDepth: number;
-        frameDepth: number;
-      }
-    | { kind: "switch"; endLabel: string; usedEnd: boolean; labels?: string[]; scopeDepth: number; frameDepth: number }
-    | { kind: "block"; endLabel: string; usedEnd: boolean; labels: string[]; scopeDepth: number; frameDepth: number }
-  )[] = [];
+  jumpTargets: JumpTarget[] = [];
   labelCounter = 0;
   readonly returnTypeByFn = new Map<string, IrType>();
   lineStarts: number[] | null = null;
@@ -287,6 +279,14 @@ export class CEmitter {
    * itself is outside (the frontend fences jumps there). */
   finallyStack: { label: string; used: boolean; frameDepth: number; scopeDepth: number }[] =
     [];
+  jumpFinallyStack: {
+    label: string;
+    frameDepth: number;
+    scopeDepth: number;
+    targetDepth: number;
+    jumps: { id: number; kind: "break" | "continue"; target: JumpTarget; next?: { label: string; id: number } }[];
+  }[] = [];
+  jumpActionCounter = 0;
   /** Return type of the function being emitted — the unwind path returns a
    * dummy of this type (never read: callers check the pending flag first). */
   currentReturnType: IrType = VOID;

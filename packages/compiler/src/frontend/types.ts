@@ -1810,6 +1810,22 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (!inner) return null;
     return { kind: "promise", inner };
   }
+  // AsyncIterable/AsyncIterator erase to the native generator handle at
+  // statically proven boundaries. `for await` never sends a next(value),
+  // so their default-any TNext is deliberately the valueless channel; this
+  // lets AsyncGenerator<T, ..., undefined> implementations satisfy the
+  // ordinary provider/event-stream declarations without dyn traffic.
+  if (
+    isStdlibInterface("AsyncIterable") ||
+    isStdlibInterface("AsyncIterator") ||
+    isStdlibInterface("AsyncIteratorObject")
+  ) {
+    const args = checker.getTypeArguments(widened as ts.TypeReference);
+    const channels = genChannels(args[0], args[1], undefined, ctx);
+    if (!channels) return null;
+    if (!genResultRecord(channels.yieldT, channels.retT, ctx.shapes, unions)) return null;
+    return { kind: "generator", ...channels };
+  }
   // Generator<T, TReturn, TNext> (and the lib's IterableIterator<T, ...>,
   // the older annotation spelling — Generator extends it): the sync
   // generator kind. Channel normalization keeps the runtime honest:

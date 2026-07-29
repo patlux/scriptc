@@ -1262,6 +1262,10 @@ export type IrStmt =
       catchBody: IrStmt[] | null;
       catchLocalId: string | null;
       finallyBody: IrStmt[] | null;
+      /** Synthetic AsyncIteratorClose region. Unlike source finally,
+       * break/continue may cross it; backends run cleanup then dispatch the
+       * original jump. Normal exhaustion skips cleanup. */
+      finallyMode?: "iterator";
       loc: SrcLoc;
     };
 

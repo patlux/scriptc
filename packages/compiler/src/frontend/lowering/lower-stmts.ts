@@ -4,7 +4,7 @@
  * finally-crossing fence), and blocked-binding poisoning. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { lowerForOfGenerator, lowerYieldStarStatement } from "./lower-generators.js";
+import { asyncGeneratorIterableOf, lowerForOfGenerator, lowerYieldStarStatement } from "./lower-generators.js";
 import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrGlobal, IrJsOp, IrLocal, IrStmt, IrType, JSVAL, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import { PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, neverTaintedJsType, stmtUsesIsland, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
@@ -5606,16 +5606,15 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         if (mapped?.kind === "generator") {
           iterable = L.lowerExpr(stmt.expression);
         } else if (mapped?.kind === "object") {
-          const info = L.classes.get(mapped.className);
-          const found = info ? L.findMethodOn(info, "sym:asyncIterator") : null;
-          if (info && found?.sig.gen !== undefined && found.sig.params.length === 0) {
+          const info = asyncGeneratorIterableOf(L, mapped);
+          if (info) {
             const recv = L.lowerExpr(stmt.expression);
             iterable = L.accessorCall(
-              info.def.name,
+              info.className,
               "sym:asyncIterator",
               recv,
               [],
-              found.sig.ret,
+              info.iterT,
               locOf(stmt.expression),
             );
           }

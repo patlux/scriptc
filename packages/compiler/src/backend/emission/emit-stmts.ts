@@ -21,6 +21,8 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
     E.jumpTargets = [];
     E.tryStack = [];
     E.finallyStack = [];
+    E.jumpFinallyStack = [];
+    E.jumpActionCounter = 0;
     E.currentReturnType = fn.returnType;
     E.currentGenerator = fn.generator ?? null;
     E.labelCounter = 0;
@@ -38,6 +40,10 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
     if (fn.returnType.kind !== "void" && returnCrossesFinally(fn.body)) {
       const init = isRefCounted(fn.returnType) ? "NULL" : "0";
       E.line(`${cDecl(fn.returnType, "sc_pret")} = ${init}; /* pending return (through finally) */`);
+    }
+
+    if (containsIteratorFinally(fn.body)) {
+      E.line(`int sc_pjump = -1; /* pending break/continue through AsyncIteratorClose */`);
     }
 
     // Captured bindings come in through the environment — borrowed for the
@@ -118,6 +124,12 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
    * try-with-finally, at any nesting depth — exactly the returns the
    * pending-return path routes, and so exactly when emitFunction must
    * declare the sc_pret slot. */
+  function containsIteratorFinally(stmts: IrStmt[]): boolean {
+    const walk = (body: IrStmt[]): boolean => body.some((s) =>
+      (s.kind === "tryCatch" && s.finallyMode === "iterator") || childBodies(s).some(walk));
+    return walk(stmts);
+  }
+
   function returnCrossesFinally(stmts: IrStmt[]): boolean {
     const hasReturn = (body: IrStmt[]): boolean =>
       body.some((s) => s.kind === "return" || childBodies(s).some(hasReturn));
@@ -529,6 +541,24 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
           }
         }
         if (!target) throw new Error("emitter bug: break target not found");
+        const targetIndex = E.jumpTargets.indexOf(target);
+        const jumpFin = [...E.jumpFinallyStack].reverse().find((f) => targetIndex < f.targetDepth);
+        if (jumpFin) {
+          E.releaseForJump(jumpFin.frameDepth, jumpFin.scopeDepth);
+          const id = E.jumpActionCounter++;
+          if (target.kind === "loop") target.endLabel ??= `sc_end_${E.labelCounter++}`;
+          target.usedEnd = true;
+          const nextFin = [...E.jumpFinallyStack]
+            .slice(0, E.jumpFinallyStack.indexOf(jumpFin))
+            .reverse()
+            .find((f) => targetIndex < f.targetDepth);
+          const next = nextFin ? { label: nextFin.label, id: E.jumpActionCounter++ } : undefined;
+          if (nextFin && next) nextFin.jumps.push({ id: next.id, kind: "break", target });
+          jumpFin.jumps.push({ id, kind: "break", target, ...(next && { next }) });
+          E.line(`sc_pjump = ${id};`);
+          E.line(`goto ${jumpFin.label};${E.srcComment(s.loc)}`);
+          break;
+        }
         E.releaseForJump(target.frameDepth, target.scopeDepth);
         if (target.kind !== "loop" || s.label !== undefined) {
           // Switches are emitted as goto chains and blocks aren't C loops
@@ -556,6 +586,24 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
           }
         }
         if (!loop) throw new Error("emitter bug: continue target not found");
+        const targetIndex = E.jumpTargets.indexOf(loop);
+        const jumpFin = [...E.jumpFinallyStack].reverse().find((f) => targetIndex < f.targetDepth);
+        if (jumpFin) {
+          E.releaseForJump(jumpFin.frameDepth, jumpFin.scopeDepth);
+          const id = E.jumpActionCounter++;
+          loop.continueLabel ??= `sc_cont_${E.labelCounter++}`;
+          loop.usedContinue = true;
+          const nextFin = [...E.jumpFinallyStack]
+            .slice(0, E.jumpFinallyStack.indexOf(jumpFin))
+            .reverse()
+            .find((f) => targetIndex < f.targetDepth);
+          const next = nextFin ? { label: nextFin.label, id: E.jumpActionCounter++ } : undefined;
+          if (nextFin && next) nextFin.jumps.push({ id: next.id, kind: "continue", target: loop });
+          jumpFin.jumps.push({ id, kind: "continue", target: loop, ...(next && { next }) });
+          E.line(`sc_pjump = ${id};`);
+          E.line(`goto ${jumpFin.label};${E.srcComment(s.loc)}`);
+          break;
+        }
         E.releaseForJump(loop.frameDepth, loop.scopeDepth);
         if (loop.continueLabel) {
           // Labeled loops always allocate one (a labeled continue may
@@ -707,7 +755,7 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
     // The pending-return region: returns inside tryBody/catchBody snapshot
     // their value and jump here-ish (the pending-return finally copy below)
     // instead of returning directly. Same depths as the unwind handler.
-    const retEntry = hasFinally
+    const retEntry = hasFinally && s.finallyMode !== "iterator"
       ? {
           label: `sc_finret_${id}`,
           used: false,
@@ -716,7 +764,26 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         }
       : null;
     E.line(`/* try */${E.srcComment(s.loc)}`);
+    const iteratorReturnEntry = hasFinally && s.finallyMode === "iterator"
+      ? {
+          label: `sc_finret_${id}`,
+          used: false,
+          frameDepth: E.frames.length,
+          scopeDepth: E.scopes.length,
+        }
+      : null;
+    const jumpEntry = hasFinally && s.finallyMode === "iterator"
+      ? {
+          label: `sc_finjump_${id}`,
+          frameDepth: E.frames.length,
+          scopeDepth: E.scopes.length,
+          targetDepth: E.jumpTargets.length,
+          jumps: [] as { id: number; kind: "break" | "continue"; target: (typeof E.jumpTargets)[number]; next?: { label: string; id: number } }[],
+        }
+      : null;
     if (retEntry) E.finallyStack.push(retEntry);
+    if (iteratorReturnEntry) E.finallyStack.push(iteratorReturnEntry);
+    if (jumpEntry) E.jumpFinallyStack.push(jumpEntry);
     E.tryStack.push(handler);
     E.emitBlock(s.tryBody);
     E.tryStack.pop();
@@ -769,13 +836,17 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
       if (hasFinally) E.tryStack.pop();
       // Normal completion of the catch falls through to afterTryLabel.
     }
+    if (jumpEntry) E.jumpFinallyStack.pop();
+    if (iteratorReturnEntry) E.finallyStack.pop();
     if (retEntry) E.finallyStack.pop();
 
     if (hasFinally) {
       if (afterTryLabelUsed) E.line(`${afterTryLabel}:;`);
-      E.line(`/* finally (normal path) */`);
-      E.emitBlock(s.finallyBody!);
-      const needEnd = excHandler.used || retEntry!.used;
+      if (s.finallyMode !== "iterator") {
+        E.line(`/* finally (normal path) */`);
+        E.emitBlock(s.finallyBody!);
+      }
+      const needEnd = excHandler.used || (retEntry?.used ?? false) || (iteratorReturnEntry?.used ?? false) || (jumpEntry?.jumps.length ?? 0) > 0;
       if (needEnd) E.line(`goto ${endLabel};`);
       if (excHandler.used) {
         // The pending exception is STASHED across the finally body (a
@@ -792,13 +863,65 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         E.line(`${finExcLabel}:; /* finally (exception path — stashed) */`);
         E.line(`ScrCaught *${stash} = scr_exc_take();`);
         E.scopes.push([{ name: stash, type: CAUGHT }]);
+        const suppress = s.finallyMode === "iterator"
+          ? { label: `sc_finsuppress_${id}`, used: false, frameDepth: E.frames.length, scopeDepth: E.scopes.length }
+          : null;
+        if (suppress) E.tryStack.push(suppress);
         E.emitBlock(s.finallyBody!);
+        if (suppress) E.tryStack.pop();
         E.scopes.pop(); // normal completion keeps the stash for the re-raise
         E.line(`scr_rethrow(${stash});`);
         E.line(`scr_caught_release(${stash});`);
         E.emitUnwind();
+        if (suppress?.used) {
+          // AsyncIteratorClose during a THROW completion preserves the
+          // original throw even when iterator.return() itself throws.
+          E.line(`${suppress.label}:; /* suppress close error; preserve original throw */`);
+          E.line(`scr_exc_clear();`);
+          E.line(`scr_rethrow(${stash});`);
+          E.line(`scr_caught_release(${stash});`);
+          E.emitUnwind();
+        }
       }
-      if (retEntry!.used) {
+      if (jumpEntry && jumpEntry.jumps.length > 0) {
+        E.line(`${jumpEntry.label}:; /* AsyncIteratorClose (pending jump) */`);
+        E.emitBlock(s.finallyBody!);
+        for (const jump of jumpEntry.jumps) {
+          E.line(`if (sc_pjump == ${jump.id}) {`);
+          E.indent++;
+          E.releaseForJump(jump.target.frameDepth, jump.target.scopeDepth);
+          if (jump.next) {
+            E.line(`sc_pjump = ${jump.next.id};`);
+            E.line(`goto ${jump.next.label};`);
+          } else if (jump.kind === "break") {
+            E.line(`goto ${jump.target.endLabel!};`);
+          } else {
+            if (jump.target.kind !== "loop" || !jump.target.continueLabel) throw new Error("emitter bug: iterator continue target");
+            E.line(`goto ${jump.target.continueLabel};`);
+          }
+          E.indent--;
+          E.line(`}`);
+        }
+        E.line(`abort();`);
+      }
+      if (iteratorReturnEntry?.used) {
+        E.line(`${iteratorReturnEntry.label}:; /* AsyncIteratorClose (pending return) */`);
+        const retT = E.currentReturnType;
+        const own = isRefCounted(retT);
+        if (own) E.scopes.push([{ name: "sc_pret", type: retT }]);
+        E.emitBlock(s.finallyBody!);
+        if (own) E.scopes.pop();
+        const outer = E.finallyStack[E.finallyStack.length - 1];
+        if (outer) {
+          outer.used = true;
+          E.releaseForJump(outer.frameDepth, outer.scopeDepth);
+          E.line(`goto ${outer.label};`);
+        } else {
+          E.releaseForJump(0, 0);
+          E.line(retT.kind === "void" ? `return;` : `return sc_pret;`);
+        }
+      }
+      if (retEntry?.used) {
         // Pending-return path: a return in the try/catch body parked its
         // value in sc_pret and jumped here after releasing down to this
         // region. The finally body runs (third copy — fresh temps/labels,
