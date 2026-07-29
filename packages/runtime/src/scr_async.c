@@ -2560,9 +2560,20 @@ static void scr_gen_switch_in(ScrGen *g) {
      * exhaust while an external source remains pending; that is the same
      * abandoned-fiber outcome as an ordinary async body with no live
      * handles. */
+    ScrCtx saved_loop_ctx = scr_loop_ctx;
     scr_loop_run();
+    scr_loop_ctx = saved_loop_ctx;
+    /* Nested driving resumes through the loop context and therefore leaves
+     * current at main. The synchronous generator consumer is still active
+     * above this call; restore its identity before returning from resume. */
+    scr_current = me;
+    scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
+    scr_als_active = me != NULL ? &me->als : &scr_als_main_slot;
     if (f->gen_awaiting) break;
   }
+  scr_current = me;
+  scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
+  scr_als_active = me != NULL ? &me->als : &scr_als_main_slot;
   if (f->done) {
     g->state = SCR_GEN_DONE;
     if (f->exc.kind != SCR_EXC_NONE) {
