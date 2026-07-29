@@ -448,6 +448,14 @@ void scr_error_set_traced(void);
 /* Allocate + initialize (name = the kind's builtin name, message retained
  * from the borrowed argument; NULL means ""). Returns +1. */
 ScrError *scr_error_new(int kind, ScrStr *message);
+/* Dynamic Error construction/initialization. message/options are borrowed
+ * dyn values; message follows Error's undefined/ToString rule, options is
+ * inspected for `cause` (engine getters may throw). Returns +1 or NULL
+ * pending. The dyn-touching implementation lives in scr_json.c. */
+ScrError *scr_error_new_dyn(int kind, const struct ScrDyn *message,
+                            const struct ScrDyn *options);
+void scr_error_init_dyn(void *obj, int kind, const struct ScrDyn *message,
+                        const struct ScrDyn *options);
 /* Construct a builtin Error with an own `cause` property. Both arguments
  * are borrowed; returns +1. The dyn-touching implementation lives in
  * scr_json.c and installs the teardown hook before storing the cause. */
@@ -3112,6 +3120,7 @@ typedef struct ScrDynJsvalOps {
    * dyn pairs. NULL with the engine's exception pending on refusal. */
   ScrDyn *(*obj_walk)(ScrJsval *cell, int mode);
   int (*has_own)(ScrJsval *cell, const ScrStr *k); /* 0/1; -1 = pending */
+  int (*has_key)(ScrJsval *cell, const ScrStr *k); /* prototype-aware 0/1; -1 = pending */
   /* Object.assign(target, src) with the ENGINE target: src converts per
    * member semantics (a wrapped src spreads by reference; dyn data
    * enters as the usual deep copy). false = pending. */

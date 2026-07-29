@@ -3049,8 +3049,12 @@ export type IrLibFn =
    * field to stamp. error.toString: borrowed `%Error`-typed receiver, +1
    * string in Node's "name: message" shape. None of the three throws. */
   | "error.new"
-  /** Cause-bearing Error construction: borrowed message + dyn cause,
-   * result an owned builtin error whose result type selects the kind. */
+  /** Dynamic Error construction: borrowed dyn message + options. The
+   * runtime applies Error's undefined/ToString rules, copies options.cause
+   * when present, and returns an owned builtin error selected by type. */
+  | "error.newDyn"
+  /** Cause-bearing Error construction retained for the direct static
+   * `{ cause }` infrastructure. Borrowed message + dyn cause. */
   | "error.newCause"
   /** The compiler-resolved Node-parity throw for always-throwing lowered
    * arms (ERR_INVALID_THIS receivers, ERR_MISSING_ARGS arity ladders,
@@ -3078,6 +3082,8 @@ export type IrLibFn =
    * no-op, kept for ownership uniformity). Never throws. A direct
    * `C.name` on the class name itself folds to a strLit instead. */
   | "class.name"
+  /** Runtime Error-prefix initialization for subclass super(): borrowed
+   * receiver + dyn message + dyn options; may throw during ToString/get. */
   | "error.ctor"
   | "error.toString"
   /** Shared ErrorOptions cause surface over any %Error-rooted receiver.
@@ -5783,7 +5789,12 @@ export function moduleUsesDynInvoke(mod: IrModule): boolean {
       return;
     }
     const node = v as { kind?: unknown; fn?: unknown };
-    if (node.kind === "dynInvoke" || (node.kind === "libCall" && node.fn === "dyn.defineProps")) {
+    if (
+      node.kind === "dynInvoke" ||
+      (node.kind === "libCall" &&
+        (node.fn === "dyn.defineProps" || node.fn === "dyn.toStringCoerce" ||
+          node.fn === "error.newDyn" || node.fn === "error.ctor"))
+    ) {
       found = true;
       return;
     }
@@ -6607,8 +6618,11 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "global.undefRead",
   // The compiler-resolved Node-parity throw: always throws, catchably.
   "error.nodeThrow",
-  // USVString coercion runs user toString/valueOf — throws propagate.
+  // USVString coercion and Error construction run user
+  // toString/valueOf/options getters — throws propagate.
   "dyn.toStringCoerce",
+  "error.newDyn",
+  "error.ctor",
   "child.kill",
   // The caller's lookup runs synchronously inside the connect call — a
   // throw there propagates like Node's.

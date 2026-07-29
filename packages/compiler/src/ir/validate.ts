@@ -770,6 +770,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // error.new's result and the receiver slots are builtin-error classes —
   // program-dependent object types, checked in the libCall case.
   "error.new": { argTypes: [STRING], result: VOID },
+  "error.newDyn": { argTypes: [DYN, DYN], result: VOID },
   "error.newCause": { argTypes: [STRING, DYN], result: VOID },
   "error.nodeThrow": { argTypes: [F64, STRING, STRING], result: VOID },
   "dyn.toStringCoerce": { argTypes: [DYN], result: STRING },
@@ -779,7 +780,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // `X.name` through a class value: the arg is a program-dependent
   // classval (a null slot; the libCall case checks the kind).
   "class.name": { argTypes: [null], result: STRING },
-  "error.ctor": { argTypes: [null, STRING], result: VOID },
+  "error.ctor": { argTypes: [null, DYN, DYN], result: VOID },
   "error.toString": { argTypes: [null], result: STRING },
   "error.hasCause": { argTypes: [null], result: BOOL },
   "error.cause": { argTypes: [null], result: DYN },
@@ -4108,7 +4109,7 @@ function validateFunction(
           // compiler-rendered fence.
           break;
         }
-        if (e.fn === "error.new" || e.fn === "error.newCause") {
+        if (e.fn === "error.new" || e.fn === "error.newDyn" || e.fn === "error.newCause") {
           // Which builtin the runtime constructs is named by the result type.
           if (!isBuiltinErrorObject(e.type)) {
             err(`libCall ${e.fn} must return a builtin error class, got ${e.type.kind}`, e.loc);

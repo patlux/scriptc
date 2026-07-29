@@ -359,10 +359,14 @@ export interface GenericClassInfo {
         decl: null,
         builtinError: true,
         ctor: null,
-        // Display shape of `new Error(message?)`. Construction and super()
-        // never complete against this — errorMessageArg owns those (the
-        // runtime ABI is one plain string; "" when omitted, like Node).
-        ctorParams: [{ type: STRING, mode: "omittable" }],
+        // Display shape of `new Error(message?, options?)`. The runtime
+        // ABI normalizes both to dyn: message is ToString-converted before
+        // it enters the static Error prefix; options is inspected only for
+        // an own/inherited `cause` property.
+        ctorParams: [
+          { type: DYN, mode: "omittable" },
+          { type: DYN, mode: "omittable" },
+        ],
         base,
         subclasses: [],
         throwingSetters: [],
@@ -4355,7 +4359,7 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
         const args = forward !== undefined
           ? forward
           : base.builtinError
-            ? [L.errorMessageArg(superCall.arguments, locOf(stmt), stmt)]
+            ? L.errorConstructorArgs(superCall.arguments, locOf(stmt), stmt)
             : base.builtinEmitter
               ? []
               : L.completeArgs(superCall.arguments, base.ctorParams, locOf(stmt), stmt);
@@ -4402,10 +4406,9 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
       loc,
     };
     if (base.builtinError) {
-      // super(message) into the runtime-provided Error constructor: stamps
-      // name/message on the (already-allocated) object. Receiver + message
-      // are BORROWED by the libCall — no ownership transfer, unlike the
-      // call form below.
+      // super(message, options) into the runtime-provided Error
+      // constructor: the runtime ToStrings message, then stamps the shared
+      // prefix and copies options.cause when present. All args borrowed.
       return {
         kind: "exprStmt",
         expr: {
@@ -4643,24 +4646,60 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
 
 /** `new C(args)` for a class declared in the program (imports resolve
    * through aliases, so cross-module classes construct too). */
-  /** The single message argument of a builtin Error construction or
-   * super() call: "" when omitted or explicitly undefined (Node's message
-   * property default), the string otherwise. */
-  export function errorMessageArg(L: Lowerer, args: readonly ts.Expression[], loc: SrcLoc, blame: ts.Node): IrExpr {
-    if (args.length > 1) {
-      L.unsupported("SC1090", args[1] ?? blame, "Error constructor options in subclass/inherited constructors");
+  /** Runtime Error-constructor ABI: two dyn slots. Omitted arguments become
+   * dyn undefined; typed values box through the checked-dynamic boundary,
+   * and island `any` values wrap by reference so ToString runs in the
+   * engine without ever entering a native string field as an engine cell. */
+  export function errorConstructorArgs(L: Lowerer, args: readonly ts.Expression[], loc: SrcLoc, blame: ts.Node): IrExpr[] {
+    if (args.length > 2) {
+      L.unsupported("SC1090", args[2] ?? blame, `Error constructors with ${args.length} arguments`);
     }
-    if (args.length === 0) return { kind: "strLit", value: "", type: STRING, loc };
-    const value = L.lowerExpr(args[0]!);
-    if (value.type.kind === "string") return value;
-    if (value.kind === "unitLit" && value.unit === "undefined") {
-      return { kind: "strLit", value: "", type: STRING, loc };
+    const lower = (node: ts.Expression | undefined): IrExpr => {
+      if (!node) return dynUndefinedExpr(loc);
+      const value = L.lowerExpr(node);
+      if (value.type.kind === "dyn") return value;
+      if (value.type.kind === "jsval") {
+        return { kind: "dynFromJsval", value, type: DYN, loc: value.loc };
+      }
+      if (value.kind === "unitLit" || L.dynConvertible(value.type)) {
+        return { kind: "dynFrom", value, type: DYN, loc: value.loc };
+      }
+      if (value.type.kind === "object" && L.errorHierarchyClassOf(value.type.className)) {
+        return { kind: "dynFrom", value: L.upcastTo(value, "%Error"), type: DYN, loc: value.loc };
+      }
+      L.unsupported(
+        "SC1090",
+        node,
+        `Error constructor arguments of type '${L.fmt(value.type)}' cannot enter checked-dynamic conversion`,
+      );
+    };
+    const optionsNode = args[1];
+    let options: IrExpr;
+    if (optionsNode && ts.isObjectLiteralExpression(optionsNode) && optionsNode.properties.length === 1) {
+      const prop = optionsNode.properties[0]!;
+      const causeNode =
+        ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "cause"
+          ? prop.initializer
+          : ts.isShorthandPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "cause"
+            ? prop.name
+            : null;
+      if (causeNode) {
+        options = {
+          kind: "dynObjLit",
+          fields: [{
+            key: { kind: "strLit", value: "cause", type: STRING, loc: locOf(prop) },
+            value: lower(causeNode),
+          }],
+          type: DYN,
+          loc: locOf(optionsNode),
+        };
+      } else {
+        options = lower(optionsNode);
+      }
+    } else {
+      options = lower(optionsNode);
     }
-    L.unsupported(
-      "SC1090",
-      args[0]!,
-      `Error messages of type '${L.fmt(value.type)}' (the message must be a string)`,
-    );
+    return [lower(args[0]), options];
   }
 
 /** `new C(...)` of a registered PROGRAM class — the shared tail of the
@@ -4713,10 +4752,9 @@ function lowerProgramClassNew(L: Lowerer, expr: ts.NewExpression, info0: ClassIn
     L.unsupported("SC1090", expr.arguments![0]!, "EventEmitter constructor options ('captureRejections')");
   }
   // A ctor-less chain into a builtin error base inherits `new
-  // C(message?)` — completed by the error rule (one plain string),
-  // not the general ABI completion.
+  // C(message?, options?)` through the shared dynamic Error ABI.
   const args = L.inheritsBuiltinErrorCtor(info)
-    ? [L.errorMessageArg(expr.arguments ?? [], loc, expr)]
+    ? L.errorConstructorArgs(expr.arguments ?? [], loc, expr)
     : L.completeArgs(expr.arguments ?? [], info.ctorParams, loc, expr);
   return {
     kind: "new",
@@ -4934,70 +4972,10 @@ export function lowerNew(L: Lowerer, expr: ts.NewExpression): IrExpr {
         };
       }
       if (errInfo) {
-        const sourceArgs = expr.arguments ?? [];
-        if (sourceArgs.length > 2) {
-          L.unsupported("SC1090", sourceArgs[2]!, `Error constructors with ${sourceArgs.length} arguments`);
-        }
-        const msg = L.errorMessageArg(sourceArgs.slice(0, 1), loc, expr);
-        const options = sourceArgs[1];
-        if (options) {
-          if (!ts.isObjectLiteralExpression(options)) {
-            L.unsupported(
-              "SC1090",
-              options,
-              "Error constructor options except an inline `{ cause: value }` object",
-            );
-          }
-          if (options.properties.length === 0) {
-            return {
-              kind: "libCall",
-              fn: "error.new",
-              args: [msg],
-              type: { kind: "object", className: errInfo.def.name },
-              loc,
-            };
-          }
-          if (options.properties.length !== 1) {
-            L.unsupported(
-              "SC1090",
-              options,
-              "Error constructor options with members other than `cause`",
-            );
-          }
-          const prop = options.properties[0]!;
-          let causeNode: ts.Expression;
-          if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "cause") {
-            causeNode = prop.initializer;
-          } else if (ts.isShorthandPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "cause") {
-            causeNode = prop.name;
-          } else {
-            L.unsupported(
-              "SC1090",
-              prop,
-              "Error constructor options except an inline `{ cause: value }` object",
-            );
-          }
-          const rawCause = L.lowerExpr(causeNode);
-          const cause = rawCause.type.kind === "object" && L.errorHierarchyClassOf(rawCause.type.className)
-            ? {
-                kind: "dynFrom" as const,
-                value: L.upcastTo(rawCause, "%Error"),
-                type: DYN,
-                loc: rawCause.loc,
-              }
-            : L.coerceInto(causeNode, rawCause, DYN);
-          return {
-            kind: "libCall",
-            fn: "error.newCause",
-            args: [msg, cause],
-            type: { kind: "object", className: errInfo.def.name },
-            loc,
-          };
-        }
         return {
           kind: "libCall",
-          fn: "error.new",
-          args: [msg],
+          fn: "error.newDyn",
+          args: L.errorConstructorArgs(expr.arguments ?? [], loc, expr),
           type: { kind: "object", className: errInfo.def.name },
           loc,
         };

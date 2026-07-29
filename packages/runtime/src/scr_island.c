@@ -1460,6 +1460,18 @@ static int isl_dynjs_has_own(ScrJsval *cell, const ScrStr *k) {
   return b > 0 ? 1 : 0;
 }
 
+static int isl_dynjs_has_key(ScrJsval *cell, const ScrStr *k) {
+  isl_entry(ISL_ENTRY_VALUE);
+  JSAtom prop = JS_NewAtomLen(isl_ctx, k->data, k->len);
+  int present = JS_HasProperty(isl_ctx, cell->v, prop);
+  JS_FreeAtom(isl_ctx, prop);
+  if (present < 0) {
+    isl_bridge_exception();
+    return -1;
+  }
+  return present;
+}
+
 static bool isl_dynjs_assign(ScrJsval *cell, const ScrDyn *src) {
   ScrJsval *sj = scr_jsval_from_dyn(src);
   if (!sj) return false;
@@ -1522,6 +1534,7 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_is_nullish,
   isl_dynjs_obj_walk,
   isl_dynjs_has_own,
+  isl_dynjs_has_key,
   isl_dynjs_assign,
   isl_dynjs_to_json,
   isl_dynjs_iter_drain,

@@ -5058,6 +5058,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.usesTimers = true;
             return finish(`scr_stdin_next_chunk()`);
           case "error.new":
+          case "error.newDyn":
           case "error.newCause": {
             // Which builtin the runtime constructs is named by the RESULT
             // type; arguments are borrowed and the runtime retains copies.
@@ -5067,26 +5068,27 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(
               e.fn === "error.new"
                 ? `scr_error_new(${rec.kind}, ${arg(0)})`
-                : `scr_error_new_cause(${rec.kind}, ${arg(0)}, ${arg(1)})`,
+                : e.fn === "error.newDyn"
+                  ? `scr_error_new_dyn(${rec.kind}, ${arg(0)}, ${arg(1)})`
+                  : `scr_error_new_cause(${rec.kind}, ${arg(0)}, ${arg(1)})`,
             );
           }
           case "error.ctor": {
-            // super(message) into the builtin base: stamps name/message on
-            // the receiver (borrowed, like the message). The RECEIVER'S
-            // static class names which builtin name to stamp.
+            // super(message, options) into the builtin base: ToStrings the
+            // message, stamps the shared prefix, and copies cause.
             const recvT = e.args[0]!.type;
             if (recvT.kind !== "object") throw new Error("emitter bug: error.ctor receiver is not a class");
             const rec = RUNTIME_ERROR_CLASSES.get(recvT.className);
             if (!rec) throw new Error(`emitter bug: error.ctor on ${recvT.className}`);
-            return finish(`scr_error_init(${arg(0)}, ${rec.kind}, ${arg(1)})`);
+            return finish(`scr_error_init_dyn(${arg(0)}, ${rec.kind}, ${arg(1)}, ${arg(2)})`);
           }
           case "error.toString":
             // Borrowed receiver; +1 "name: message" (Node's toString rules).
             return finish(`scr_error_to_string(${arg(0)})`);
           case "error.hasCause":
-            return finish(`scr_error_has_cause(${arg(0)})`);
+            return finish(`scr_error_has_cause((ScrError *)${arg(0)})`);
           case "error.cause":
-            return finish(`scr_error_cause(${arg(0)})`);
+            return finish(`scr_error_cause((ScrError *)${arg(0)})`);
           case "error.newDom":
             // new DOMException(message?, nameOrOptions?) — both dyn args
             // borrowed (WebIDL resolution runs in the runtime); +1

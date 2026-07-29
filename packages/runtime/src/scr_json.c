@@ -1531,10 +1531,13 @@ ScrStr *scr_dyn_string_coerce_js(const ScrDyn *d) {
  * value are all BORROWED (the member retains the value in). */
 static const char *scr_dyn_kind_name(const ScrDyn *d);
 /* `key in v` with a RUNTIME key (the compile-time dynHasKey fold, per
- * value): OBJ answers own-member presence, ARR answers 'length' or a
- * valid dense index, every other kind false (tsc admits `in` only on
- * object-typed operands). Borrows both; never throws. */
+ * value): OBJ answers member presence, ARR answers 'length' or a valid
+ * dense index, and JSVAL delegates to the engine's prototype-aware
+ * HasProperty operation. A Proxy has-trap throw is bridged and pending. */
 bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key) {
+  if (v->kind == SCR_DYN_JSVAL) {
+    return scr_dyn_jsval_ops()->has_key(v->v.jsval.cell, key) == 1;
+  }
   if (v->kind == SCR_DYN_OBJ) return scr_dyn_obj_get(v, key->data, key->len) != NULL;
   if (v->kind == SCR_DYN_ARR) {
     if (key->len == 6 && memcmp(key->data, "length", 6) == 0) return true;
@@ -2865,6 +2868,80 @@ ScrError *scr_error_new_cause(int kind, ScrStr *message, const ScrDyn *cause) {
   ScrError *e = scr_error_new(kind, message);
   e->has_cause = true;
   e->cause = scr_dyn_retain((ScrDyn *)(cause ? cause : scr_dyn_undefined()));
+  return e;
+}
+
+/* Error(message, options): convert message BEFORE touching static Error
+ * storage. A JSVAL routes ToString to the engine; the returned ScrStr is
+ * native and retained by scr_error_init. options.cause is copied by
+ * identity as a dyn value. Engine getters bridge throws and leave pending. */
+static ScrStr *scr_error_message_dyn(const ScrDyn *message) {
+  if (message == NULL || message->kind == SCR_DYN_UNDEF) return scr_str_new("", 0);
+  ScrStr *out = scr_dyn_string_coerce_js(message);
+  if (scr_exc_pending()) {
+    scr_str_release(out);
+    return NULL;
+  }
+  return out;
+}
+
+static bool scr_error_options_cause(const ScrDyn *options, ScrDyn **cause) {
+  *cause = NULL;
+  if (options == NULL || options->kind == SCR_DYN_UNDEF || options->kind == SCR_DYN_NULL) return true;
+  static const char cause_text[] = "cause";
+  ScrStr *key = scr_str_new(cause_text, sizeof cause_text - 1);
+  bool present = scr_dyn_has_key(options, key);
+  if (scr_exc_pending()) {
+    scr_str_release(key);
+    return false;
+  }
+  if (!present) {
+    scr_str_release(key);
+    return true;
+  }
+  if (options->kind == SCR_DYN_OBJ) {
+    ScrDyn *v = scr_dyn_obj_get(options, cause_text, sizeof cause_text - 1);
+    *cause = scr_dyn_retain(v ? v : scr_dyn_undefined());
+  } else if (options->kind == SCR_DYN_JSVAL) {
+    *cause = scr_dyn_isl_key_get(options, key);
+  } else {
+    *cause = scr_dyn_retain(scr_dyn_undefined());
+  }
+  scr_str_release(key);
+  return *cause != NULL;
+}
+
+void scr_error_init_dyn(void *obj, int kind, const ScrDyn *message,
+                        const ScrDyn *options) {
+  ScrStr *msg = scr_error_message_dyn(message);
+  if (!msg) return;
+  ScrDyn *cause = NULL;
+  if (!scr_error_options_cause(options, &cause)) {
+    scr_str_release(msg);
+    return;
+  }
+  scr_error_install_cause_drop(&scr_error_cause_drop_impl);
+  scr_error_init(obj, kind, msg);
+  scr_str_release(msg);
+  if (cause) {
+    ScrError *e = (ScrError *)obj;
+    e->has_cause = true;
+    e->cause = cause;
+  }
+}
+
+ScrError *scr_error_new_dyn(int kind, const ScrDyn *message,
+                            const ScrDyn *options) {
+  ScrStr *msg = scr_error_message_dyn(message);
+  if (!msg) return NULL;
+  ScrDyn *cause = NULL;
+  if (!scr_error_options_cause(options, &cause)) {
+    scr_str_release(msg);
+    return NULL;
+  }
+  ScrError *e = cause ? scr_error_new_cause(kind, msg, cause) : scr_error_new(kind, msg);
+  scr_dyn_release(cause);
+  scr_str_release(msg);
   return e;
 }
 

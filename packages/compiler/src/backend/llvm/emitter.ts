@@ -11552,7 +11552,7 @@ class LlEmitter {
       B.line(`${raw} = call ptr @${sym}(ptr ${v.name})`);
       return this.wrapNullable(raw, raw, STRING, strTag, e.type, undefTag);
     }
-    if (e.fn === "error.new" || e.fn === "error.newCause") {
+    if (e.fn === "error.new" || e.fn === "error.newDyn" || e.fn === "error.newCause") {
       // Which builtin the runtime constructs is named by the RESULT type;
       // arguments are borrowed and the runtime retains copies.
       if (e.type.kind !== "object") throw new Error(`llvm emitter bug: ${e.fn} result is not a class`);
@@ -11564,10 +11564,12 @@ class LlEmitter {
         this.declare(`declare ptr @scr_error_new(i32, ptr)`);
         B.line(`${t} = call ptr @scr_error_new(i32 ${rec.kind}, ptr ${msg.name})`);
       } else {
-        const cause = this.emitExpr(e.args[1]!);
-        this.declare(`declare ptr @scr_error_new_cause(i32, ptr, ptr)`);
-        B.line(`${t} = call ptr @scr_error_new_cause(i32 ${rec.kind}, ptr ${msg.name}, ptr ${cause.name})`);
+        const second = this.emitExpr(e.args[1]!);
+        const sym = e.fn === "error.newDyn" ? "scr_error_new_dyn" : "scr_error_new_cause";
+        this.declare(`declare ptr @${sym}(i32, ptr, ptr)`);
+        B.line(`${t} = call ptr @${sym}(i32 ${rec.kind}, ptr ${msg.name}, ptr ${second.name})`);
       }
+      if (e.fn === "error.newDyn") this.emitPendingCheck();
       return this.own({ name: t, type: e.type });
     }
     if (e.fn === "error.hasCause" || e.fn === "error.cause") {
@@ -11583,16 +11585,16 @@ class LlEmitter {
       return this.own({ name: t, type: e.type });
     }
     if (e.fn === "error.ctor") {
-      // super(message) into the builtin base: stamps name/message on the
-      // receiver (borrowed, like the message). The RECEIVER'S static class
-      // names which builtin name to stamp.
+      // super(message, options) into the builtin base: ToStrings the
+      // message, stamps the shared prefix, and copies cause.
       const recvT = e.args[0]!.type;
       if (recvT.kind !== "object") throw new Error("llvm emitter bug: error.ctor receiver is not a class");
       const rec = RUNTIME_ERROR_CLASSES.get(recvT.className);
       if (!rec) throw new Error(`llvm emitter bug: error.ctor on ${recvT.className}`);
       const args = e.args.map((a) => this.emitExpr(a));
-      this.declare(`declare void @scr_error_init(ptr, i32, ptr)`);
-      B.line(`call void @scr_error_init(ptr ${args[0]!.name}, i32 ${rec.kind}, ptr ${args[1]!.name})`);
+      this.declare(`declare void @scr_error_init_dyn(ptr, i32, ptr, ptr)`);
+      B.line(`call void @scr_error_init_dyn(ptr ${args[0]!.name}, i32 ${rec.kind}, ptr ${args[1]!.name}, ptr ${args[2]!.name})`);
+      this.emitPendingCheck();
       return { name: "", type: e.type };
     }
     if (e.fn === "error.code") {
