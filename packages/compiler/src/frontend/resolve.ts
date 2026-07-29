@@ -289,11 +289,19 @@ export function projectDtsRuntimeSibling(path: string): string | null {
  * paths as spelled), or null. */
 export function resolveRelativeModule(fromFile: string, specifier: string): string | null {
   const base = resolve(dirname(resolve(fromFile)), specifier);
-  // Inside an opted-in --npm-static package, relative edges resolve to the
-  // shipped JS, never to a sibling declaration twin: the .d.ts is the
-  // claim, the JS is the code that compiles (npm-static.ts — the tsgo
-  // host hides the same files, so both worlds answer the JS).
-  if (npmStaticPackageOfPath(resolve(fromFile)) !== null) {
+  // Inside OR INTO an opted-in --npm-static package, relative edges
+  // resolve to the shipped JS, never to a sibling declaration twin: the
+  // .d.ts is the claim, the JS is the code that compiles (npm-static.ts —
+  // the tsgo host hides the same files, so both worlds answer the JS).
+  // The target-side check is essential for composition-root entries that
+  // import `./node_modules/pkg/dist/file.js` directly: the importing file
+  // is outside npm, but the resolved module is still opted-in package code
+  // and must become a module-order/init edge rather than a declaration-only
+  // miss that silently omits the package body.
+  if (
+    npmStaticPackageOfPath(resolve(fromFile)) !== null ||
+    npmStaticPackageOfPath(base) !== null
+  ) {
     return loadAsJsFile(base) ?? loadAsJsDirectory(base);
   }
   const answer = loadAsFile(base) ?? loadAsDirectory(base);
