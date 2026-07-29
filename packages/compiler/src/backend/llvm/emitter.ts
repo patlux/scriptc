@@ -11507,7 +11507,12 @@ class LlEmitter {
       this.emitPendingCheck();
       return out;
     }
-    if (MAY_THROW_LIB_FNS.has(e.fn) && LIB_FN_SYMS[e.fn] === undefined) {
+    if (
+      MAY_THROW_LIB_FNS.has(e.fn) &&
+      LIB_FN_SYMS[e.fn] === undefined &&
+      e.fn !== "error.newDyn" &&
+      e.fn !== "error.ctor"
+    ) {
       throw new LlvmUnsupportedError(`libCall:${e.fn}`, e.loc);
     }
     if (e.fn === "math.floor" || e.fn === "math.trunc" || e.fn === "math.ceil") {

@@ -16,12 +16,6 @@ try {
   if (err instanceof RangeError) console.log('caught', err.message);
 }
 
-try {
-  makeError(Symbol('message'));
-} catch {
-  console.log('symbol throw');
-}
-
 class DirectError extends Error {
   constructor(message, options) {
     super(message, options);

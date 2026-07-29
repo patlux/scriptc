@@ -5774,12 +5774,12 @@ export function moduleUsesAssert(mod: IrModule): boolean {
   return found;
 }
 
-/** True when the module contains any dynInvoke node or dyn.defineProps
- * libCall — the link switch that pulls scr_dyn_invoke.c (the prototype-
- * method dispatch on dyn receivers, plus scr_dyn_display and
- * scr_dyn_define_props) into the binary (cc.ts; the assert gating
- * precedent — dispatch-free binaries keep their exact size class). Same
- * walk shape as moduleUsesZlib. */
+/** True when the module contains any dynInvoke node or libCall whose
+ * runtime implementation reaches scr_dyn_invoke.c. Besides prototype
+ * method dispatch/defineProps, dynamic Error construction needs that TU
+ * for checked-dynamic callable toString/valueOf. This is a LINK switch,
+ * not the library-mode semantic refusal predicate. Same walk shape as
+ * moduleUsesZlib. */
 export function moduleUsesDynInvoke(mod: IrModule): boolean {
   let found = false;
   const visit = (v: unknown): void => {
@@ -5794,6 +5794,31 @@ export function moduleUsesDynInvoke(mod: IrModule): boolean {
       (node.kind === "libCall" &&
         (node.fn === "dyn.defineProps" || node.fn === "dyn.toStringCoerce" ||
           node.fn === "error.newDyn" || node.fn === "error.ctor"))
+    ) {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** Library-mode semantic gate for actual checked-dynamic prototype
+ * dispatch. Dynamic Error conversion may share the link unit but remains
+ * synchronous and therefore must not trigger SC4005. */
+function moduleUsesPrototypeDispatch(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (
+      node.kind === "dynInvoke" ||
+      (node.kind === "libCall" && node.fn === "dyn.defineProps")
     ) {
       found = true;
       return;
@@ -6354,7 +6379,7 @@ export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: Sr
     [moduleUsesNodeTest(mod), "the node:test surface"],
     [moduleUsesDynAsync(mod), "the checked-dynamic async surface"],
     [moduleUsesDc(mod), "the diagnostics_channel surface"],
-    [moduleUsesDynInvoke(mod), "checked-dynamic prototype dispatch"],
+    [moduleUsesPrototypeDispatch(mod), "checked-dynamic prototype dispatch"],
   ];
   for (const [on, surface] of coarse) {
     if (on) return { surface, loc: entryLoc };
