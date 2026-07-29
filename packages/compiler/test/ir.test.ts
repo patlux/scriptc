@@ -88,9 +88,19 @@ test("validator accepts shift results only in canonical top or tagged representa
     }],
   });
 
+  const fnElem: IrType = { kind: "func", params: [STRING], ret: VOID };
+  const recordElem: IrType = { kind: "record", shapeId: "r0" };
+  const recordMod = make(recordElem, { kind: "union", unionId: "u0" });
+  recordMod.records = [{ id: "r0", fields: [{ name: "settled", type: BOOL }] }];
+
   expect(validateModule(make(JSVAL, JSVAL))).toEqual([]);
   expect(validateModule(make(DYN, DYN))).toEqual([]);
   expect(validateModule(make(F64, { kind: "union", unionId: "u0" }))).toEqual([]);
+  expect(validateModule(make(fnElem, { kind: "union", unionId: "u0" }))).toEqual([]);
+  expect(validateModule(recordMod)).toEqual([]);
+  expect(validateModule(make(fnElem, fnElem)).map((e) => e.message)).toContain(
+    "in __main: arrIntrinsic shift result must be the elem|undefined union",
+  );
   expect(validateModule(make(JSVAL, { kind: "union", unionId: "u0" })).map((e) => e.message)).toContain(
     "union u0: arm 0 is jsval",
   );

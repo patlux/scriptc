@@ -317,9 +317,23 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
         );
       }
       const receiver = L.lowerExpr(access.expression);
-      // any/unknown already carry undefined in their own representation;
-      // every other element type gets the tagged elem|undefined result.
-      const resultT = L.withUndefinedArm(elem);
+      // Result canonicalization is representation-directed, not merely the
+      // checker's `T | undefined` spelling. Top-value arrays already carry
+      // the empty-array undefined in their element representation; ordinary
+      // typed arrays require the physical tagged elem|undefined union used by
+      // the shift emitters. Keep the split explicit here so function/record
+      // elements cannot accidentally inherit the top-value collapse.
+      const resultT = elem.kind === "dyn" || elem.kind === "jsval"
+        ? elem
+        : L.withUndefinedArm(elem);
+      if (
+        elem.kind !== "dyn" && elem.kind !== "jsval" &&
+        (resultT.kind !== "union" ||
+          L.armTag(resultT.unionId, elem) < 0 ||
+          L.armTag(resultT.unionId, UNDEFINED_T) < 0)
+      ) {
+        throw new Error(`lowerer bug: shift of ${elem.kind} did not produce elem|undefined`);
+      }
       return { kind: "arrIntrinsic", method: "shift", receiver, args: [], type: resultT, loc };
     }
     if (name === "join") {

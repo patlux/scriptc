@@ -8,4 +8,5 @@ class UpperStream extends EventStream {
 
 const stream = new UpperStream("event:");
 console.log(stream.upper("ready"));
+stream.exerciseShift();
 void stream.consume();
