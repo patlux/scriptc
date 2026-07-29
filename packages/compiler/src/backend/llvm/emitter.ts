@@ -3436,8 +3436,10 @@ class LlEmitter {
         if (!target) throw new Error("llvm emitter bug: break target not found");
         const targetIndex = this.jumpTargets.indexOf(target);
         const fins = this.finallyStack.filter((f) => f.mode === "iterator" && targetIndex < f.targetDepth).reverse();
-        if (fins.length > 0) this.emitIteratorJumpFinallys(fins);
-        if (B.isTerminated()) break;
+        if (fins.length > 0) {
+          this.emitIteratorJumpFinallys(fins, target.frameDepth, target.scopeDepth, target.brkLabel);
+          break;
+        }
         this.releaseForJump(target.frameDepth, target.scopeDepth);
         B.terminate(`br label %${target.brkLabel}`);
         break;
@@ -3456,8 +3458,10 @@ class LlEmitter {
         if (!target || target.contLabel === null) throw new Error("llvm emitter bug: continue target not found");
         const targetIndex = this.jumpTargets.indexOf(target);
         const fins = this.finallyStack.filter((f) => f.mode === "iterator" && targetIndex < f.targetDepth).reverse();
-        if (fins.length > 0) this.emitIteratorJumpFinallys(fins);
-        if (B.isTerminated()) break;
+        if (fins.length > 0) {
+          this.emitIteratorJumpFinallys(fins, target.frameDepth, target.scopeDepth, target.contLabel);
+          break;
+        }
         this.releaseForJump(target.frameDepth, target.scopeDepth);
         B.terminate(`br label %${target.contLabel}`);
         break;
@@ -3564,20 +3568,37 @@ class LlEmitter {
     }
   }
 
-  private emitIteratorJumpFinallys(fins: (typeof this.finallyStack)[number][]): void {
+  private emitIteratorJumpFinallys(
+    fins: (typeof this.finallyStack)[number][],
+    targetFrameDepth: number,
+    targetScopeDepth: number,
+    targetLabel: string,
+  ): void {
     const savedFrames = this.frames;
     const savedScopes = this.scopes;
     const savedFinally = this.finallyStack;
     const savedTry = this.tryStack;
+    let liveFrames = savedFrames;
+    let liveScopes = savedScopes;
     for (const fin of fins) {
       const idx = savedFinally.lastIndexOf(fin);
+      this.frames = liveFrames;
+      this.scopes = liveScopes;
       this.releaseForJump(fin.frameDepth, fin.scopeDepth);
-      this.frames = savedFrames.slice(0, fin.frameDepth);
-      this.scopes = savedScopes.slice(0, fin.scopeDepth);
+      liveFrames = liveFrames.slice(0, fin.frameDepth);
+      liveScopes = liveScopes.slice(0, fin.scopeDepth);
+      this.frames = liveFrames;
+      this.scopes = liveScopes;
       this.finallyStack = savedFinally.slice(0, idx);
       this.tryStack = savedTry.slice(0, fin.tryDepth);
       this.emitBlock(fin.body);
       if (this.B.isTerminated()) break;
+    }
+    if (!this.B.isTerminated()) {
+      this.frames = liveFrames;
+      this.scopes = liveScopes;
+      this.releaseForJump(targetFrameDepth, targetScopeDepth);
+      this.B.terminate(`br label %${targetLabel}`);
     }
     this.frames = savedFrames;
     this.scopes = savedScopes;
