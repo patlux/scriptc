@@ -2329,8 +2329,16 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       // class imported from an npm-static JS module. Index that symbol too
       // so derived program classes map back onto the already-collected
       // runtime declaration instead of becoming unregistered nominal types.
-      const instanceSym = L.typeOf(decl).getSymbol();
-      if (instanceSym) L.classBySymbol.set(instanceSym, info);
+      // Never do this for generic-class instantiations: typeOf(decl) names
+      // the shared family symbol there, so registering each specialization
+      // would overwrite the family binding with the last concrete instance.
+      if (
+        inst === undefined && mixin === undefined &&
+        isJsSourceFile(decl.getSourceFile()) && implicitMonoFile(decl.getSourceFile())
+      ) {
+        const instanceSym = L.typeOf(decl).getSymbol();
+        if (instanceSym) L.classBySymbol.set(instanceSym, info);
+      }
       // A NAMED class binds its name (declarations in their scope, class
       // expressions inside their own bodies — tsc resolves both to this
       // symbol); a nameless default-export declaration binds its module's

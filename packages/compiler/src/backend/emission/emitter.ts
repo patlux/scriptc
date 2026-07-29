@@ -646,7 +646,14 @@ export class CEmitter {
     // declarations beside the raw body signatures.
     for (const fn of this.mod.functions) {
       if (fn.generator === undefined) continue;
-      const params = fn.params.map((p) => cDecl(p.type, mangleLocal(p.localId)));
+      const boxedIds = new Set(fn.locals.filter((l) => l.boxed).map((l) => l.id));
+      const params = [
+        ...(fn.captures !== undefined ? ["ScrClosure *sc_env"] : []),
+        ...fn.params.map((p) => cDecl(
+          p.type,
+          boxedIds.has(p.localId) ? mangleRawParam(p.localId) : mangleLocal(p.localId),
+        )),
+      ];
       out.push(`static ScrGen *${mangleGenSpawn(fn.name)}(${params.join(", ") || "void"});`);
     }
     // Class objects (classes as values): construct-thunk prototypes plus
