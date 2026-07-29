@@ -998,6 +998,10 @@ export class Lowerer {
    * lowering bypass the checker's enormous structural JSON types without
    * changing unrelated checked-dynamic flows. */
   readonly jsonDynSymbols = new Set<ts.Symbol>();
+  /** Default-empty options parameters stored as checked-dynamic objects.
+   * Separate provenance from JSON: both require representation-first reads,
+   * but only this set denotes an ABI choice preserving the own-key table. */
+  readonly defaultObjectDynSymbols = new Set<ts.Symbol>();
   /** The embedded npm runtime graph (collectNpmImports), attached to the
    * emitted module. Null without npm imports or without --dynamic. */
   npmEmbedded: IrModule["embedded"] | null = null;
@@ -1614,7 +1618,8 @@ export class Lowerer {
     }
     if (ts.isIdentifier(expr)) {
       const symbol = this.resolveValueSymbol(expr);
-      return symbol !== null && this.jsonDynSymbols.has(symbol);
+      return symbol !== null &&
+        (this.jsonDynSymbols.has(symbol) || this.defaultObjectDynSymbols.has(symbol));
     }
     if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
       return this.isJsonDynExpr(expr.expression);
@@ -1638,6 +1643,12 @@ export class Lowerer {
     if (!ts.isIdentifier(name)) return;
     const symbol = this.checker.getSymbolAtLocation(name);
     if (symbol) this.jsonDynSymbols.add(symbol);
+  }
+
+  markDefaultObjectDynBinding(name: ts.BindingName): void {
+    if (!ts.isIdentifier(name)) return;
+    const symbol = this.checker.getSymbolAtLocation(name);
+    if (symbol) this.defaultObjectDynSymbols.add(symbol);
   }
 
   splitFiles(): FileParts[] {
@@ -5591,17 +5602,14 @@ export class Lowerer {
         return this.coerceInto(node, this.lowerArrayLiteral(x, expected), expected);
       }
     }
-    // An OBJECT LITERAL against a checked-dynamic slot in a JS file (the
-    // getSupportInfo options argument — a dyn-ABI param): the value's
-    // world IS the checked-dynamic tree — build the dyn literal directly, before the
-    // island gate could claim the checker's `any` context (an island
-    // build could never land in the slot: no engine→dyn crossing).
+    // An OBJECT LITERAL against a checked-dynamic slot (an emitted-JS or
+    // typed default-options ABI): the value's world IS the checked-dynamic
+    // tree — build the dyn literal directly. This also preserves own-key
+    // presence for explicitly written undefined properties.
     if (expected?.kind === "dyn") {
       let x: ts.Expression = node;
       while (ts.isParenthesizedExpression(x)) x = x.expression;
-      if (ts.isObjectLiteralExpression(x) && isJsSourceFile(x.getSourceFile())) {
-        return lowerDynObjectLiteral(this, x);
-      }
+      if (ts.isObjectLiteralExpression(x)) return lowerDynObjectLiteral(this, x);
     }
     // An ARRAY LITERAL against a UNION slot whose own type has no static
     // home (the JS dyn fallback — the checker gave no usable context):

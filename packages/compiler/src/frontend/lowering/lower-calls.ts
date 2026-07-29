@@ -906,6 +906,19 @@ export function collectSignatureInner(L: Lowerer, decl: ts.FunctionDeclaration):
     }
 
     const params = L.paramShapes(decl.parameters);
+    // A defaulted JavaScript options object emitted from typed source loses
+    // its annotation (`options = {}`), so the checker reports the empty
+    // record even though calls pass shaped objects. A fixed record would
+    // conflate absent and present-undefined own properties. Keep this ABI
+    // in the checked-dynamic object world instead: dyn preserves the real
+    // own-key table, direct reads answer undefined on misses, and typed use
+    // sites validate on exit. The exact empty-literal + direct-member-use
+    // gate keeps ordinary empty records unchanged.
+    decl.parameters.forEach((param, i) => {
+      if (!defaultEmptyObjectParam(L, decl, param)) return;
+      params[i] = { type: DYN, mode: "omittable", bodyType: DYN };
+      L.markDefaultObjectDynBinding(param.name);
+    });
     // A JS function's body-owned `arguments` object rides one hidden dyn
     // array parameter. Zero-param functions keep the historic dynRest ABI
     // (packing starts at params.length = 0); declared-parameter functions
@@ -1877,6 +1890,46 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     walk(body);
     return written;
   }
+
+/** True for an emitted-JS default options parameter whose checker type is
+ * the empty-record inference residue but whose body directly reads/writes
+ * members. It must use dyn storage to retain property presence. */
+function defaultEmptyObjectParam(
+  L: Lowerer,
+  decl: ts.FunctionLikeDeclaration,
+  param: ts.ParameterDeclaration,
+): boolean {
+  if (!decl.body || !ts.isIdentifier(param.name) || !param.initializer) return false;
+  let init: ts.Expression = param.initializer;
+  while (ts.isParenthesizedExpression(init)) init = init.expression;
+  if (!ts.isObjectLiteralExpression(init) || init.properties.length !== 0) return false;
+  const mapped = L.mapTypeOf(L.typeOf(param.name));
+  if (mapped?.kind !== "record") return false;
+  const shape = L.shapes.get(mapped.shapeId);
+  if (!shape || shape.indexValue || shape.tuple) return false;
+  const allOptional =
+    shape.fields.length > 0 &&
+    shape.fields.every((field) => field.type.kind === "union" && L.armTag(field.type.unionId, UNDEFINED_T) >= 0);
+  if (!isJsSourceFile(decl.getSourceFile()) && !allOptional) return false;
+  if (isJsSourceFile(decl.getSourceFile()) && shape.fields.length !== 0) return false;
+  const symbol = L.checker.getSymbolAtLocation(param.name);
+  if (!symbol) return false;
+  let used = false;
+  const scan = (node: ts.Node): void => {
+    if (used) return;
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      L.checker.getSymbolAtLocation(node.expression) === symbol
+    ) {
+      used = true;
+      return;
+    }
+    node.forEachChild(scan);
+  };
+  scan(decl.body);
+  return used;
+}
 
 /** The implicit-type-parameter slots of a JS function-like: parallel to
    * decl.parameters, the param SYMBOL where the slot is a bindable
@@ -5292,6 +5345,11 @@ const inliningPredicates = new Set<ts.Symbol>();
       );
     }
     const shapes = L.paramShapes(node.parameters);
+    node.parameters.forEach((param, i) => {
+      if (!defaultEmptyObjectParam(L, node, param)) return;
+      shapes[i] = { type: DYN, mode: "omittable", bodyType: DYN };
+      L.markDefaultObjectDynBinding(param.name);
+    });
     // A concise arrow over an h2-only stream/session call (`() =>
     // req.stream.destroy()`): the call ALWAYS throws on this lowering
     // (stream is undefined — the streamUndefCall precedent), so the body

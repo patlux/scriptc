@@ -124,6 +124,24 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   }, 120_000);
 
   test.for([undefined, "c"] as const)(
+    "default-object npm package preserves retryCount presence (%s backend)",
+    async (backend) => {
+      // Exact directory-lock startup shape: emitted JS has `options = {}`
+      // and reads retryCount; own-key presence must still distinguish an
+      // omitted key from an explicitly present undefined key.
+      const entry = join(pilotRoot, "default-object-cli.ts");
+      const binary = await buildStatic(entry, ["default-object-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test.for([undefined, "c"] as const)(
     "extends an npm class whose runtime declaration joined the static graph (%s backend)",
     async (backend) => {
       const entry = join(pilotRoot, "event-stream-extends-cli.ts");
