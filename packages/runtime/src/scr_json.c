@@ -1641,6 +1641,44 @@ void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value) {
   scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
 }
 
+/* Keyed DELETE on a dyn receiver (`delete o[k]`): plain OBJ removes the own
+ * member when present (key buffer freed, value released; survivors keep
+ * insertion order) and always answers true — JS's configurable own-property
+ * result on these plain data properties. Absent keys are true no-ops.
+ * undefined/null throw Node's catchable ToObject TypeError; every other
+ * kind fences loudly (arrays/handles/engine values/primitives stay outside
+ * this lane). Both operands BORROWED. */
+bool scr_dyn_key_delete(ScrDyn *recv, ScrStr *key) {
+  if (recv->kind == SCR_DYN_OBJ) {
+    for (size_t i = 0; i < recv->v.obj.len; i++) {
+      ScrDynEntry *e = &recv->v.obj.entries[i];
+      if (e->key_len == key->len && memcmp(e->key, key->data, key->len) == 0) {
+        free(e->key);
+        scr_dyn_release(e->value);
+        size_t rest = recv->v.obj.len - i - 1;
+        if (rest > 0) {
+          memmove(e, e + 1, rest * sizeof *e);
+        }
+        recv->v.obj.len -= 1;
+        return true;
+      }
+    }
+    return true; /* absent key: a no-op, like JS */
+  }
+  ScrJsonBuf b;
+  scr_jb_init(&b);
+  if (recv->kind == SCR_DYN_UNDEF || recv->kind == SCR_DYN_NULL) {
+    scr_jb_puts(&b, "Cannot convert undefined or null to object");
+    scr_throw_error(SCR_ERR_TYPE, scr_jb_finish(&b));
+    return false;
+  }
+  scr_jb_puts(&b, "delete of a dynamic ");
+  scr_jb_puts(&b, scr_dyn_kind_name(recv));
+  scr_jb_puts(&b, " is not supported yet");
+  scr_throw_error(SCR_ERR_ERROR, scr_jb_finish(&b));
+  return false;
+}
+
 /* Node's JSON.stringify over a dyn: object members holding undefined DROP,
  * array slots holding undefined print null. A bare undefined never arrives
  * (the record serializer drops the entry first); print null defensively. */

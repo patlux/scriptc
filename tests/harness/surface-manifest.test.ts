@@ -127,8 +127,10 @@ const PROBES: Probe[] = [
   { id: "diagnostic.sc2011", source: "const y: any = 1;\nconst z = y * 2;\nconsole.log(0);\n" },
   // status unsupported — refused with the entry's code
   { id: "syntax.debugger-statements", source: "debugger;\nconsole.log(0);\n" },
+  // delete of pure Record / process.env / checked-dynamic plain objects is
+  // static; hybrid index-signature deletes remain the unsupported probe.
   {
-    id: "syntax.delete-expressions",
+    id: "diagnostic.sc1090",
     source:
       'type Hybrid = { base: string; [k: string]: string };\nconst h: Hybrid = { base: "b", extra: "e" };\ndelete h["extra"];\nconsole.log(h.base);\n',
   },

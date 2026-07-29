@@ -56,7 +56,9 @@ export const UNSUPPORTED_EXPR: Partial<Record<ts.SyntaxKind, { code: keyof typeo
   // TaggedTemplateExpression is supported (an interned per-site strings
   // object + an ordinary call); handled in lowerExpr via lowerTaggedTemplate.
   [ts.SyntaxKind.TypeOfExpression]: { code: "SC1090", feature: "typeof expressions" },
-  [ts.SyntaxKind.DeleteExpression]: { code: "SC1090", feature: "delete expressions" },
+  // DeleteExpression is supported for process.env keys, pure Record keys,
+  // optional record fields, and checked-dynamic plain objects — handled in
+  // lowerDeleteExpression before this table.
   // RegularExpressionLiteral is supported (regex); handled in lowerExpr.
   [ts.SyntaxKind.SpreadElement]: { code: "SC1090", feature: "spread arguments" },
   // PostfixUnaryExpression is supported (expression-position ++/-- over

@@ -2893,6 +2893,12 @@ void scr_dyn_obj_set(ScrDyn *obj, const char *key, size_t key_len, ScrDyn *value
  * non-object kinds throw Node's catchable TypeErrors (strict-mode
  * wording). All three operands BORROWED (the value is retained in). */
 void scr_dyn_key_set(ScrDyn *recv, ScrStr *key, ScrDyn *value);
+/* Keyed DELETE on a dyn receiver (`delete o[k]`): OBJ removes the own
+ * member when present (key+value released; survivor order kept) and
+ * answers true; absent keys are true no-ops. undefined/null throw the
+ * catchable ToObject TypeError; other kinds fence loudly (fail closed).
+ * Both operands borrowed. */
+bool scr_dyn_key_delete(ScrDyn *recv, ScrStr *key);
 /* `key in v` with a runtime key — the dynHasKey fold per value (OBJ own
  * members, ARR length/valid indices, false elsewhere). Never throws. */
 bool scr_dyn_has_key(const ScrDyn *v, const ScrStr *key);

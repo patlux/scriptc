@@ -22,7 +22,7 @@ import { lowerStreamUnderscoreAssign, streamClassAliasDecl, streamSidesOf } from
 import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } from "./lower-server.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireCalleeFileOf, createRequireNamespaceDecl } from "./lower-builtins.js";
 import { lowerEnumDeclaration } from "./lower-enums.js";
-import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerBuiltinPropertyAssignStmt, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
+import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerBuiltinPropertyAssignStmt, lowerDeleteExpression, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
@@ -3472,87 +3472,11 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     };
   }
 
-/** Statement-position `delete`: process.env keys → process.envUnset
-   * (unsetenv), pure `Record<string, T>` keys → recordKeyDelete (the
-   * overflow Map delete), declared OPTIONAL fields → the undefined-arm
-   * write (absence IS the undefined arm; divergence 60). Everything else
-   * fences with the honest reason — a required field is a struct slot no
-   * runtime can remove. */
+/** Statement-position `delete` — process.env keys, pure Record keys,
+   * optional fields, and checked-dynamic plain objects (dyn.keyDelete).
+   * Value position yields the boolean result through the same lowering. */
   function lowerDeleteStatement(L: Lowerer, expr: ts.DeleteExpression): IrStmt {
-    const loc = locOf(expr);
-    let target: ts.Expression = expr.expression;
-    while (ts.isParenthesizedExpression(target)) target = target.expression;
-    if (!ts.isElementAccessExpression(target) && !ts.isPropertyAccessExpression(target)) {
-      L.unsupported("SC1090", expr, "'delete' of non-property expressions");
-    }
-    const lowerKey = (): IrExpr => {
-      if (ts.isPropertyAccessExpression(target)) {
-        return { kind: "strLit", value: target.name.text, type: STRING, loc: locOf(target.name) };
-      }
-      const keyNode = (target as ts.ElementAccessExpression).argumentExpression;
-      const key = L.lowerExpr(keyNode);
-      if (key.type.kind !== "string") {
-        L.unsupported(
-          "SC1090",
-          keyNode,
-          `'delete' with '${L.fmt(key.type)}' keys (index-signature and env keys are strings)`,
-        );
-      }
-      return key;
-    };
-    if (L.isProcessEnv(target.expression)) {
-      return {
-        kind: "exprStmt",
-        expr: { kind: "libCall", fn: "process.envUnset", args: [lowerKey()], type: VOID, loc },
-        loc,
-      };
-    }
-    const obj = L.lowerExpr(target.expression);
-    if (obj.type.kind === "record") {
-      const shape = L.shapes.get(obj.type.shapeId);
-      if (shape?.indexValue && shape.fields.length === 0 && !shape.tuple) {
-        return { kind: "recordKeyDelete", obj, shapeId: obj.type.shapeId, key: lowerKey(), loc };
-      }
-      // `delete r.f` of a declared OPTIONAL field (undefined-armed slot) is
-      // the undefined-arm write: a monomorphic shape cannot remove its
-      // slot, and absence IS the undefined arm (divergences 37/56), so the
-      // observable results — `in` answers false, Object.keys skips it,
-      // JSON.stringify drops it — match Node's post-delete answers exactly
-      // (divergence 60 documents the delete/`= undefined` collapse).
-      // Constant keys only (dot access or a literal bracket); required
-      // fields keep the honest fence below.
-      const fieldName = ts.isPropertyAccessExpression(target)
-        ? target.name.text
-        : ts.isStringLiteral(target.argumentExpression)
-          ? target.argumentExpression.text
-          : null;
-      const field = fieldName !== null && !shape?.tuple
-        ? shape?.fields.find((f) => f.name === fieldName)
-        : undefined;
-      if (field) {
-        const absent = L.wrappedUndefined(field.type, loc);
-        if (absent) {
-          return { kind: "recordSet", obj, shapeId: obj.type.shapeId, field: field.name, value: absent, loc };
-        }
-      }
-      if (shape?.indexValue) {
-        L.unsupported(
-          "SC1090",
-          expr,
-          "'delete' of hybrid index-signature keys (declared struct slots and overflow entries answer differently — model deletable dynamic keys with a pure Record<string, T>)",
-        );
-      }
-      L.unsupported(
-        "SC1090",
-        expr,
-        "'delete' of required record fields (a monomorphic shape cannot remove its slot — only optional fields delete, becoming the undefined arm)",
-      );
-    }
-    L.unsupported(
-      "SC1090",
-      expr,
-      `'delete' on '${L.fmt(obj.type)}' receivers (process.env keys and pure Record<string, T> keys delete)`,
-    );
+    return { kind: "exprStmt", expr: lowerDeleteExpression(L, expr), loc: locOf(expr) };
   }
 
 /** The exact `Object.defineProperty(exports|module.exports, "__esModule",
@@ -3969,13 +3893,9 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
       // defineProperty fence would throw at module load.
       if (isEsModuleStamp(expr)) return { kind: "block", body: [], loc: locOf(expr) };
     }
-    // Statement-position `delete` — the two honest receivers: process.env
-    // keys (unsetenv(3) — later reads and spawned children observe the
-    // removal, exactly Node) and PURE index-signature records (an overflow
-    // Map delete; hybrids fence — a declared struct slot cannot be
-    // removed). JS's boolean result is constant true in these shapes, and
-    // statement position discards it anyway; value-position deletes keep
-    // the expression fence.
+    // Statement-position `delete` — process.env keys, pure Record keys,
+    // optional fields, and checked-dynamic plain objects (dyn.keyDelete).
+    // Value position yields the boolean result through the same lowering.
     if (ts.isDeleteExpression(expr)) return lowerDeleteStatement(L, expr);
     // Statement-position `void e` — the fire-and-forget idiom (`void
     // poll();`, `void main();` — lint-visible "I meant to drop this

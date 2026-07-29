@@ -1615,6 +1615,17 @@ export type IrLibFn =
    * SEMANTICS.md notes the sloppy divergence: loud, never silent). Void
    * result; in the may-throw seed set. */
   | "dyn.keySet"
+  /** Keyed DELETE on a dyn value — `delete h.k` / `delete h["k"]` on a
+   * checked-dynamic plain object (args: receiver, key string; both
+   * borrowed; result: bool). An OBJ receiver removes the own member when
+   * present (key and value released; insertion order of survivors kept)
+   * and always answers true — JS's configurable-own-property result on
+   * these plain data properties. Absent keys are true no-ops, like JS.
+   * undefined/null throw Node's catchable ToObject TypeError; every other
+   * kind (arrays, handles, engine values, primitives) fences loudly —
+   * fail closed rather than invent a partial prototype/nonconfigurable
+   * story. In the may-throw seed set. */
+  | "dyn.keyDelete"
   /** Destructuring pack over a dyn source — `const [a, b] = d`, a
    * destructured dyn callback param (args: the source and the STATIC
    * TypeError spelling, "" when the source has none — both borrowed;
@@ -6763,6 +6774,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // throws Node's catchable SyntaxError at construction.
   "regex.new",
   "dyn.keySet",
+  "dyn.keyDelete",
   // the destructuring pack throws V8's TypeError on non-iterable dyn kinds
   "dyn.iterPack",
   "dyn.toString",

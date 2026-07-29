@@ -2629,13 +2629,6 @@
       "code": "SC1090"
     },
     {
-      "id": "syntax.delete-expressions",
-      "kind": "syntax",
-      "name": "delete expressions",
-      "status": "unsupported",
-      "code": "SC1090"
-    },
-    {
       "id": "syntax.namespaces",
       "kind": "syntax",
       "name": "namespaces",

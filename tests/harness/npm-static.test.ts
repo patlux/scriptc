@@ -123,6 +123,9 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // implicit-any instance must keep those as bound direct calls rather
     // than reading prototype methods as values.
     ["package-layout-static", "package-layout-cli.ts"],
+    // Legacy session + transformMessages-style plain-key deletes, plus
+    // process.env cleanup, under checked-dynamic receivers.
+    ["delete-shape-static", "delete-shape-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, [pkg]);
