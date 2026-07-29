@@ -34,9 +34,14 @@ interface String {
  * emits the field list statically and the values are exactly T[keyof T] —
  * without this the result would be `any`-typed and drag every downstream
  * use into the island. */
+type ScriptcObjectValue<T extends object> =
+  T extends readonly (infer E)[] ? E :
+  T extends ReadonlyMap<unknown, unknown> | ReadonlySet<unknown> ? never :
+  T[keyof T];
+
 interface ObjectConstructor {
-  values<T extends object>(o: T): Array<T[keyof T]>;
-  entries<T extends object>(o: T): Array<[string, T[keyof T]]>;
+  values<T extends object>(o: T): Array<ScriptcObjectValue<T>>;
+  entries<T extends object>(o: T): Array<[string, ScriptcObjectValue<T>]>;
 }
 
 /* `parse` returns `unknown`, not the lib's `any` — the dynamic boundary. A

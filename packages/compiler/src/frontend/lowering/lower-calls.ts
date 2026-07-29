@@ -6756,6 +6756,254 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     return { kind: "call", callee: helper, args: [receiver], type: resultT, loc };
   }
 
+  /** Coerce one statically-enumerated value into Object.values/entries'
+   * checker result element. This is the ordinary typed-slot conversion
+   * (arm wrap, union re-tag, width copy, checked dyn edge), not a bespoke
+   * enumeration cast. A residue means the checker result is wider in a
+   * way the IR cannot represent; fail closed at the Object static. */
+  function objectEnumValue(
+    L: Lowerer,
+    node: ts.Node,
+    member: "values" | "entries",
+    source: IrExpr,
+    target: IrType,
+    detail: string,
+  ): IrExpr {
+    const converted = L.coerceToExpected(source, target);
+    if (!typeEquals(converted.type, target)) {
+      L.unsupported(
+        "SC1090",
+        node,
+        `Object.${member} over ${detail} (a '${L.fmt(source.type)}' value cannot flow into the '${L.fmt(target)}' result element)`,
+      );
+    }
+    return converted;
+  }
+
+  /** Array Object statics. Static arrays are dense and have no expando
+   * property surface, so their own enumerable string keys are exactly
+   * "0".."length-1"; values copy the elements and entries pair each
+   * decimal index with its element. The helper returns a fresh array —
+   * Object.values(a) must not alias a. */
+  function objectIterOverArray(
+    L: Lowerer,
+    call: ts.CallExpression,
+    member: "keys" | "values" | "entries",
+    receiver: IrExpr,
+    arrayT: IrType & { kind: "array" },
+    resultT: IrType & { kind: "array" },
+  ): IrExpr {
+    const loc = locOf(call);
+    let valueT: IrType | null = member === "values" ? resultT.elem : null;
+    let tupleT: (IrType & { kind: "record" }) | null = null;
+    if (member === "entries") {
+      if (resultT.elem.kind !== "record") L.badType(call, L.typeOf(call));
+      tupleT = resultT.elem;
+      const tupleShape = L.shapes.get(tupleT.shapeId);
+      if (!tupleShape?.tuple || tupleShape.fields.length !== 2) L.badType(call, L.typeOf(call));
+      valueT = tupleShape.fields.find((f) => f.name === "1")!.type;
+    }
+    const key = `obj.${member}:array:${typeKey(arrayT)}:${typeKey(resultT)}`;
+    let helper = L.arrHofHelpers.get(key);
+    if (!helper) {
+      helper = `%obj.${member}.${L.arrHofHelpers.size}`;
+      const ref = (localId: string, type: IrType): IrExpr => ({ kind: "varRef", localId, type, loc });
+      const arrRef = ref("a.0", arrayT);
+      const outRef = ref("out.0", resultT);
+      const iRef = ref("i.0", F64);
+      const indexKey: IrExpr = { kind: "toString", operand: iRef, type: STRING, loc };
+      const raw: IrExpr = { kind: "arrayGet", arr: arrRef, index: iRef, type: arrayT.elem, loc };
+      const surfaced = valueT
+        ? objectEnumValue(L, call, member === "keys" ? "values" : member, raw, valueT, `'${L.fmt(arrayT)}'`)
+        : null;
+      const pushed: IrExpr =
+        member === "keys"
+          ? indexKey
+          : member === "values"
+            ? surfaced!
+            : {
+                kind: "recordLit",
+                fields: [
+                  { name: "0", value: indexKey },
+                  { name: "1", value: surfaced! },
+                ],
+                type: tupleT!,
+                loc,
+              };
+      const body: IrStmt[] = [
+        { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: resultT, loc }, loc },
+        {
+          kind: "for",
+          init: { kind: "varDecl", localId: "i.0", init: { kind: "numLit", value: 0, type: F64, loc }, loc },
+          cond: {
+            kind: "bin",
+            op: "<",
+            left: iRef,
+            right: { kind: "arrIntrinsic", method: "length", receiver: arrRef, args: [], type: F64, loc },
+            type: BOOL,
+            loc,
+          },
+          update: {
+            kind: "assign",
+            localId: "i.0",
+            value: { kind: "bin", op: "+", left: iRef, right: { kind: "numLit", value: 1, type: F64, loc }, type: F64, loc },
+            loc,
+          },
+          body: [{ kind: "exprStmt", expr: { kind: "arrIntrinsic", method: "push", receiver: outRef, args: [pushed], type: F64, loc }, loc }],
+          loc,
+        },
+        { kind: "return", value: outRef, loc },
+      ];
+      L.arrHofHelpers.set(key, helper);
+      L.liftedFns.push({
+        name: helper,
+        params: [{ localId: "a.0", name: "a", type: arrayT }],
+        returnType: resultT,
+        locals: [
+          { id: "a.0", name: "a", type: arrayT, mutable: true },
+          { id: "out.0", name: "out", type: resultT, mutable: false },
+          { id: "i.0", name: "i", type: F64, mutable: true },
+        ],
+        body,
+        loc,
+      });
+    }
+    return { kind: "call", callee: helper, args: [receiver], type: resultT, loc };
+  }
+
+  /** Map/Set Object statics. Entries in these containers are internal
+   * slots, not own properties; the static model has no expando members.
+   * Therefore Object.keys/values/entries always return a fresh empty
+   * array, while still evaluating and retaining the receiver through the
+   * ordinary helper call. */
+  function objectIterOverInternalSlotContainer(
+    L: Lowerer,
+    call: ts.CallExpression,
+    member: "keys" | "values" | "entries",
+    receiver: IrExpr,
+    resultT: IrType & { kind: "array" },
+  ): IrExpr {
+    const loc = locOf(call);
+    const key = `obj.${member}:empty:${typeKey(receiver.type)}:${typeKey(resultT)}`;
+    let helper = L.arrHofHelpers.get(key);
+    if (!helper) {
+      helper = `%obj.${member}.${L.arrHofHelpers.size}`;
+      L.arrHofHelpers.set(key, helper);
+      L.liftedFns.push({
+        name: helper,
+        params: [{ localId: "o.0", name: "o", type: receiver.type }],
+        returnType: resultT,
+        locals: [{ id: "o.0", name: "o", type: receiver.type, mutable: true }],
+        body: [{ kind: "return", value: { kind: "arrayLit", elems: [], type: resultT, loc }, loc }],
+        loc,
+      });
+    }
+    return { kind: "call", callee: helper, args: [receiver], type: resultT, loc };
+  }
+
+  /** Class-instance Object statics. A leaf/exact class has a closed own-key
+   * set: base fields initialize first and remain own on the derived
+   * instance, followed by each class's own public/string field order.
+   * Prototype methods/accessors, #private fields, symbol slots, and erased
+   * `declare` fields are omitted. JS inferred properties created only by
+   * later assignments carry dynamic presence and therefore fence. */
+  function objectIterOverClass(
+    L: Lowerer,
+    call: ts.CallExpression,
+    member: "keys" | "values" | "entries",
+    info: ClassInfo,
+    receiver: IrExpr,
+    receiverT: IrType & { kind: "object" },
+    resultT: IrType & { kind: "array" },
+  ): IrExpr {
+    const loc = locOf(call);
+    if (info.def.runtime || info.classDecorators) {
+      L.unsupported("SC1090", call, `Object.${member} over runtime-provided or decorated class instances`);
+    }
+    const chain: ClassInfo[] = [];
+    for (let cur: ClassInfo | null = info; cur; cur = cur.base) chain.push(cur);
+    chain.reverse();
+    const fields: { name: string; type: IrType }[] = [];
+    const seen = new Set<string>();
+    for (const cls of chain) {
+      for (const f of cls.fieldOrder) {
+        if (f.dynamicPresence) {
+          L.unsupported(
+            "SC1090",
+            call,
+            `Object.${member} over '${info.def.jsName ?? info.def.name}' instances whose field '${f.name}' is created by a later runtime assignment`,
+          );
+        }
+        if (f.redeclared || f.enumerable === false || f.name.startsWith("#") || seen.has(f.name)) continue;
+        fields.push({ name: f.name, type: f.type });
+        seen.add(f.name);
+      }
+    }
+    let valueT: IrType | null = member === "values" ? resultT.elem : null;
+    let tupleT: (IrType & { kind: "record" }) | null = null;
+    if (member === "entries") {
+      if (resultT.elem.kind !== "record") L.badType(call, L.typeOf(call));
+      tupleT = resultT.elem;
+      const tupleShape = L.shapes.get(tupleT.shapeId);
+      if (!tupleShape?.tuple || tupleShape.fields.length !== 2) L.badType(call, L.typeOf(call));
+      valueT = tupleShape.fields.find((f) => f.name === "1")!.type;
+    }
+    const classT: IrType & { kind: "object" } = { kind: "object", className: info.def.name };
+    const key = `obj.${member}:class:${info.def.name}:${typeKey(resultT)}`;
+    let helper = L.arrHofHelpers.get(key);
+    if (!helper) {
+      helper = `%obj.${member}.${L.arrHofHelpers.size}`;
+      const objRef: IrExpr = { kind: "varRef", localId: "o.0", type: classT, loc };
+      const outRef: IrExpr = { kind: "varRef", localId: "out.0", type: resultT, loc };
+      const body: IrStmt[] = [
+        { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: resultT, loc }, loc },
+      ];
+      for (const f of fields) {
+        const raw: IrExpr = { kind: "fieldGet", obj: objRef, className: info.def.name, field: f.name, type: f.type, loc };
+        const surfaced = valueT
+          ? objectEnumValue(L, call, member === "keys" ? "values" : member, raw, valueT, `'${info.def.jsName ?? info.def.name}' instances`)
+          : null;
+        const pushed: IrExpr =
+          member === "keys"
+            ? { kind: "strLit", value: f.name, type: STRING, loc }
+            : member === "values"
+              ? surfaced!
+              : {
+                  kind: "recordLit",
+                  fields: [
+                    { name: "0", value: { kind: "strLit", value: f.name, type: STRING, loc } },
+                    { name: "1", value: surfaced! },
+                  ],
+                  type: tupleT!,
+                  loc,
+                };
+        body.push({
+          kind: "exprStmt",
+          expr: { kind: "arrIntrinsic", method: "push", receiver: outRef, args: [pushed], type: F64, loc },
+          loc,
+        });
+      }
+      body.push({ kind: "return", value: outRef, loc });
+      L.arrHofHelpers.set(key, helper);
+      L.liftedFns.push({
+        name: helper,
+        params: [{ localId: "o.0", name: "o", type: classT }],
+        returnType: resultT,
+        locals: [
+          { id: "o.0", name: "o", type: classT, mutable: true },
+          { id: "out.0", name: "out", type: resultT, mutable: false },
+        ],
+        body,
+        loc,
+      });
+    }
+    let exactReceiver: IrExpr = receiver;
+    if (receiverT.className !== info.def.name) {
+      exactReceiver = { kind: "downcast", value: receiver, type: classT, loc };
+    }
+    return { kind: "call", callee: helper, args: [exactReceiver], type: resultT, loc };
+  }
+
   /** Interned `%obj.hasOwn.<n>(r, k)` — Object.hasOwn's membership walk
    * over a signature-free record shape: the key compares against each
    * declared field name, undefined-armed fields answering by their tag
@@ -7462,7 +7710,36 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       const probed = probeLower(L, argNode);
       if (probed?.type.kind === "record") argIr = probed.type;
     }
-    if (argIr?.kind !== "record") return null; // Maps, classes, arrays → the SC2020 fence
+    const loc = locOf(call);
+    const resultT = L.irTypeOf(call);
+    if (resultT.kind !== "array") L.badType(call, L.typeOf(call)); // defensive
+    if (argIr?.kind === "array") {
+      const receiver = L.lowerExpr(argNode);
+      if (receiver.type.kind !== "array") return null;
+      return objectIterOverArray(L, call, member, receiver, argIr, resultT);
+    }
+    if (argIr?.kind === "map" || argIr?.kind === "set") {
+      const receiver = L.lowerExpr(argNode);
+      if (receiver.type.kind !== argIr.kind) return null;
+      return objectIterOverInternalSlotContainer(L, call, member, receiver, resultT);
+    }
+    if (argIr?.kind === "object") {
+      const staticInfo = L.classes.get(argIr.className);
+      if (!staticInfo) return null;
+      const exact = exactInstanceClassOf(L, argNode);
+      const info = exact ?? (staticInfo.subclasses.length === 0 ? staticInfo : null);
+      if (!info) {
+        L.unsupported(
+          "SC1090",
+          call,
+          `Object.${member} over '${L.fmt(argIr)}' receivers whose runtime subclass is not statically known`,
+        );
+      }
+      const receiver = L.lowerExpr(argNode);
+      if (receiver.type.kind !== "object") return null;
+      return objectIterOverClass(L, call, member, info, receiver, argIr, resultT);
+    }
+    if (argIr?.kind !== "record") return null;
     const shape = L.shapes.get(argIr.shapeId);
     if (!shape || shape.tuple) return null; // tuple → the fence
     // Accessor-carrying shapes: Node's answer includes the accessor NAMES
@@ -7482,9 +7759,6 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       // (lowerObjectIterOverIndexShape in lower-containers).
       return lowerObjectIterOverIndexShape(L, call, member, argIr, shape);
     }
-    const loc = locOf(call);
-    const resultT = L.irTypeOf(call);
-    if (resultT.kind !== "array") L.badType(call, L.typeOf(call)); // defensive
     const receiver = L.lowerExpr(argNode);
     if (member === "keys") {
       // The keys walk is shared with for-in (which iterates exactly the
@@ -7520,19 +7794,7 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       for (const name of order) {
         const f = shape.fields.find((x) => x.name === name)!;
         const raw: IrExpr = { kind: "recordGet", obj: ref, shapeId: argIr.shapeId, field: f.name, type: f.type, loc };
-        // The pushed element per member; null when the field's value
-        // cannot flow into the result element type.
-        const elemOf = (value: IrExpr, vt: IrType): IrExpr | null => {
-          if (!valueT) return null;
-          if (typeEquals(vt, valueT)) return value;
-          if (valueT.kind === "union" && vt.kind !== "union") {
-            const tag = L.armTag(valueT.unionId, vt);
-            if (tag >= 0) {
-              return { kind: "unionWrap", unionId: valueT.unionId, tag, value, type: valueT, loc };
-            }
-          }
-          return null;
-        };
+
         // Undefined-armed fields: the push is guarded by a tag test, and
         // the pushed value is the narrowed non-undefined arm.
         let guardUndefTag: number | null = null;
@@ -7578,15 +7840,14 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
             );
           }
         }
-        const coerced = elemOf(value, vt);
-        if (!coerced) {
-          L.unsupported(
-            "SC1090",
-            call,
-            `Object.${member} over '${L.fmt(argIr)}' (field '${f.name}' of type '${L.fmt(f.type)}' ` +
-              `cannot flow into the '${L.fmt(valueT!)}' result element — read the fields directly)`,
-          );
-        }
+        const coerced = objectEnumValue(
+          L,
+          call,
+          member,
+          value,
+          valueT!,
+          `'${L.fmt(argIr)}' field '${f.name}'`,
+        );
         const pushed: IrExpr =
           member === "values"
             ? coerced

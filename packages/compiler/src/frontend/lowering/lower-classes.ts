@@ -29,8 +29,20 @@ export interface ClassInfo {
   fields: Map<string, IrType>;
   /** OWN fields only (declaration order) with their initializers: the
    * class's constructor runs exactly these — inherited fields initialize in
-   * the base constructor, before/via super(). */
-  fieldOrder: { name: string; type: IrType; initializer: ts.Expression | undefined; /** Redeclared INHERITED field: the initializer assigns the base slot at this position; no new slot (def.fields excludes it). */ redeclared?: true }[];
+   * the base constructor, before/via super(). `enumerable: false` marks
+   * storage that is not an own enumerable string property (#private,
+   * symbol-keyed, and erased `declare` fields). `dynamicPresence` is the
+   * JS inferred-property case: the slot starts undefined but the own key is
+   * not created until a later assignment, so static enumeration must fence. */
+  fieldOrder: {
+    name: string;
+    type: IrType;
+    initializer: ts.Expression | undefined;
+    /** Redeclared INHERITED field: the initializer assigns the base slot at this position; no new slot (def.fields excludes it). */
+    redeclared?: true;
+    enumerable?: false;
+    dynamicPresence?: true;
+  }[];
   /** OWN declared methods only — inherited lookups walk the base chain
    * (findMethodOn). An `abstract` entry is a signature with no body (and
    * no module function): it declares the vtable slot; concrete subclasses
@@ -1418,7 +1430,10 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           }
           // #private fields ride the ordinary field machinery — the '#'
           // name is unspellable publicly, so the slot never collides, and
-          // enumeration surfaces (inspect) exclude it like Node.
+          // enumeration surfaces (inspect) exclude it like Node. A
+          // `declare` field is type-only and likewise creates no runtime
+          // property; the layout slot remains available to existing typed
+          // reads, but enumeration metadata marks it non-enumerable.
           if (!ts.isIdentifier(member.name) && !ts.isPrivateIdentifier(member.name)) {
             L.unsupported("SC1090", member, "computed field names");
           }
@@ -1540,7 +1555,13 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             }
           }
           fields.set(member.name.text, type);
-          fieldOrder.push({ name: member.name.text, type, initializer: member.initializer });
+          const erased = (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Ambient) !== 0;
+          fieldOrder.push({
+            name: member.name.text,
+            type,
+            initializer: member.initializer,
+            ...((ts.isPrivateIdentifier(member.name) || erased) ? { enumerable: false as const } : {}),
+          });
         } else if (ts.isConstructorDeclaration(member)) {
           // A body-less constructor is an OVERLOAD SIGNATURE: type-world,
           // lowers to nothing — tsc resolved each `new` against the
@@ -2141,7 +2162,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
               if (!type || type.kind === "void") L.badType(lhs, t ?? L.typeOf(lhs));
               fields.set(key.fieldName, type);
               symbolFields.set(key.sym, key.fieldName);
-              fieldOrder.push({ name: key.fieldName, type, initializer: undefined });
+              fieldOrder.push({ name: key.fieldName, type, initializer: undefined, enumerable: false });
             }
           }
         }
@@ -2189,7 +2210,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             const armed = undefArmedFieldType(L, p);
             if (armed !== null) {
               fields.set(p.name, armed);
-              fieldOrder.push({ name: p.name, type: armed, initializer: undefined });
+              fieldOrder.push({ name: p.name, type: armed, initializer: undefined, dynamicPresence: true });
               continue;
             }
           }

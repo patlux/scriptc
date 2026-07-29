@@ -5562,10 +5562,9 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
     // The overflow value must surface as the element type (identity, an
     // arm of a union element, or a dyn element over a dyn signature).
     if (valueT) {
-      const ivSurfaces =
-        typeEquals(iv, valueT) ||
-        (valueT.kind === "union" && L.armTag(valueT.unionId, iv) >= 0) ||
-        (valueT.kind === "dyn" && iv.kind === "dyn");
+      const probe: IrExpr = { kind: "varRef", localId: "%obj.enum.probe", type: iv, loc };
+      const converted = L.coerceToExpected(probe, valueT);
+      const ivSurfaces = typeEquals(converted.type, valueT);
       if (!ivSurfaces) {
         L.unsupported(
           "SC1090",
@@ -5603,36 +5602,18 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
         // The pushed value per member; null when the field cannot surface.
         const surfaced = (): IrExpr | null => {
           if (!valueT) return null;
-          if (typeEquals(f.type, valueT)) return raw;
-          if (valueT.kind === "dyn") {
-            return L.dynConvertible(f.type) ? { kind: "dynFrom", value: raw, type: DYN, loc } : null;
-          }
-          if (valueT.kind === "union") {
-            const tag = L.armTag(valueT.unionId, f.type);
-            if (tag >= 0) return { kind: "unionWrap", unionId: valueT.unionId, tag, value: raw, type: valueT, loc };
-            // An undefined-armed field union whose ONE other arm is an
-            // element arm: narrow (the undefined case is guard-skipped),
-            // then wrap.
-            if (utag >= 0 && f.type.kind === "union") {
-              const others = (L.unions.get(f.type.unionId)?.arms ?? []).filter((a) => a.kind !== "undefinedT");
-              if (others.length === 1) {
-                const otherTag = L.armTag(valueT.unionId, others[0]!);
-                const narrowTag = L.armTag(f.type.unionId, others[0]!);
-                if (otherTag >= 0 && narrowTag >= 0) {
-                  const other = others[0]!;
-                  // A UNIT other arm pushes the unit LITERAL (undefined
-                  // was filtered above, so the unit is null; units carry
-                  // no payload and narrowing to a unit arm is malformed
-                  // IR) — the fixed-shape helper's rule exactly.
-                  const narrowed: IrExpr = isUnitType(other)
-                    ? { kind: "unitLit", unit: "null", type: other, loc }
-                    : { kind: "unionNarrow", unionId: f.type.unionId, tag: narrowTag, value: raw, type: other, loc };
-                  return { kind: "unionWrap", unionId: valueT.unionId, tag: otherTag, value: narrowed, type: valueT, loc };
-                }
-              }
+          let source: IrExpr = raw;
+          if (utag >= 0 && f.type.kind === "union") {
+            const others = (L.unions.get(f.type.unionId)?.arms ?? []).filter((a) => a.kind !== "undefinedT");
+            if (others.length === 1) {
+              const other = others[0]!;
+              source = isUnitType(other)
+                ? { kind: "unitLit", unit: "null", type: other, loc }
+                : { kind: "unionNarrow", unionId: f.type.unionId, tag: L.armTag(f.type.unionId, other), value: raw, type: other, loc };
             }
           }
-          return null;
+          const converted = L.coerceToExpected(source, valueT);
+          return typeEquals(converted.type, valueT) ? converted : null;
         };
         let pushed: IrExpr;
         if (member === "keys") {
@@ -5679,7 +5660,10 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
       const ksRef = ref("ks.0", ksT);
       const kRef = ref("k.0", STRING);
       const readValue: IrExpr | null = valueT
-        ? { kind: "recordKeyGet", obj: rRef, shapeId: argIr.shapeId, key: kRef, overflowOnly: true, type: valueT, loc }
+        ? L.coerceToExpected(
+            { kind: "recordKeyGet", obj: rRef, shapeId: argIr.shapeId, key: kRef, overflowOnly: true, type: iv, loc },
+            valueT,
+          )
         : null;
       const loopPushed: IrExpr =
         member === "keys"

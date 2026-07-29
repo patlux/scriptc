@@ -2987,6 +2987,9 @@ function validateFunction(
         if (e.type.kind === "dyn" && shape.indexValue && shape.indexValue.kind !== "dyn") {
           err(`recordKeyGet on ${e.shapeId}: dyn result over a non-dyn index value`, e.loc);
         }
+        if (e.overflowOnly && shape.indexValue && !typeEquals(e.type, shape.indexValue)) {
+          err(`recordKeyGet on ${e.shapeId}: overflowOnly read must use the index-value type`, e.loc);
+        }
         if (shape.indexValue && e.type.kind !== "dyn" && !surfaces(shape.indexValue)) {
           err(`recordKeyGet on ${e.shapeId}: the overflow value cannot surface as the result type`, e.loc);
         }
