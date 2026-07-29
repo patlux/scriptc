@@ -33,10 +33,10 @@ import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./
 /** Stable ESM identity for one statically embedded source file. Program
  * modules preserve their exact source path (the same stance as
  * __filename). Installed npm modules additionally carry a relocation
- * anchor: their package-relative file suffix below the entry/output root.
- * That keeps file identity useful to fileURLToPath, dirname, and string
- * predicates without baking a transient staging root into the native
- * product; native package sidecars are copied beside the executable.
+ * anchor below `<entry-root>/.scriptc-modules/<package>/`, retaining both
+ * package name and package-relative suffix. That keeps module identities
+ * distinct and useful to fileURLToPath, dirname, and string predicates
+ * without baking a transient staging root into the native product.
  * If no safe package-relative suffix can be derived, fail closed rather
  * than manufacturing an identity. */
 function staticImportMetaPath(L: Lowerer, sf: ts.SourceFile): string | null {
@@ -56,10 +56,15 @@ function staticImportMetaPath(L: Lowerer, sf: ts.SourceFile): string | null {
     return null;
   }
   const entryDir = dirname(L.entry.fileName);
-  // Native package sidecars are copied beside the executable, so the
-  // stable embedded identity uses that layout directly: package files
-  // appear below the output root at their package-relative suffix.
-  const anchored = resolve(entryDir, packageRelative.split("/").join(sep));
+  // A virtual identity tree beside the executable: no loader reads it,
+  // but its package-qualified shape survives relocation and cannot collide
+  // when two embedded packages ship the same relative file name.
+  const anchored = resolve(
+    entryDir,
+    ".scriptc-modules",
+    pkg.split("/").join(sep),
+    packageRelative.split("/").join(sep),
+  );
   const rel = relative(entryDir, anchored);
   if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
   return anchored;
