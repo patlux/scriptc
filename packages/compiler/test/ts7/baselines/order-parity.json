@@ -5331,6 +5331,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2650-public-generator-methods.ts": {
+   "order": [
+    "<repo>/tests/corpus/2650-public-generator-methods.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2651-async-generator-methods.ts": {
+   "order": [
+    "<repo>/tests/corpus/2651-async-generator-methods.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
