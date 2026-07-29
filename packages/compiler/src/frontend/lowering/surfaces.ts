@@ -913,6 +913,20 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     fns: ["perf.now"],
     note: "the global performance object and the performance.now.bind(performance) function value reach the same clock",
   },
+  // ── the mutable URL properties lowered by the generic assignment
+  // reference path (construction/getters already have their own surfaces).
+  {
+    id: "stdlib.url.protocol-set",
+    kind: "stdlib",
+    name: "URL.protocol assignment",
+    fns: ["url.protocolSet"],
+  },
+  {
+    id: "stdlib.url.pathname-set",
+    kind: "stdlib",
+    name: "URL.pathname assignment",
+    fns: ["url.pathnameSet"],
+  },
   // ── the process global's ambient reads and authority calls
   // (lowerProcessProperty/lowerProcessMethodCall — process is a
   // provenance-checked global here, not an importable module).
@@ -924,6 +938,13 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     note: "reads, writes, deletes, and enumeration of the process environment (the process global)",
   },
   { id: "node-builtin.process.argv", kind: "node-builtin", name: "process.argv", fns: ["process.argv"] },
+  {
+    id: "node-builtin.process.title",
+    kind: "node-builtin",
+    name: "process.title",
+    fns: ["process.title", "process.titleSet"],
+    note: "read/write of the argv-backed process title",
+  },
   { id: "node-builtin.process.cwd", kind: "node-builtin", name: "process.cwd", fns: ["process.cwd"] },
   { id: "node-builtin.process.chdir", kind: "node-builtin", name: "process.chdir", fns: ["process.chdir"] },
   { id: "node-builtin.process.pid", kind: "node-builtin", name: "process.pid", fns: ["process.pid"] },

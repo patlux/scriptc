@@ -1877,6 +1877,11 @@ export type IrLibFn =
   | "url.host"
   | "url.hostname"
   | "url.pathname"
+  /** WHATWG URL setter slice. Both mutate the borrowed URL in place and
+   * borrow the assigned string; invalid protocol spellings and disallowed
+   * special/non-special transitions are ignored exactly like Node. */
+  | "url.protocolSet"
+  | "url.pathnameSet"
   | "url.href"
   | "url.fileURLToPathUrl"
   | "url.fileURLToPathStr"
@@ -2824,6 +2829,11 @@ export type IrLibFn =
    * spawned children observe the write, like Node (values are strings —
    * the frontend fences non-string RHS). Never throws. */
   | "process.envSet"
+  /** process.title: the mutable argv-backed process label. Reads return
+   * the exact assigned/truncated value, like Node's POSIX implementation.
+   * Both borrow/return strings normally and never throw. */
+  | "process.title"
+  | "process.titleSet"
   /** The whole environment as alternating [k0, v0, k1, v1, ...] strings in
    * environ order — the raw material of the process.env SNAPSHOT record
    * (the frontend's interned %env.snapshot helper keyed-writes the pairs

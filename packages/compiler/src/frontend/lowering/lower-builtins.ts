@@ -4964,6 +4964,9 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (member === "platform") {
       return { kind: "libCall", fn: "process.platform", args: [], type: STRING, loc };
     }
+    if (member === "title") {
+      return { kind: "libCall", fn: "process.title", args: [], type: STRING, loc };
+    }
     // process.arch: the compiled binary's OWN architecture ("arm64",
     // "x64") — the same answer Node gives for its own build on the same
     // machine.

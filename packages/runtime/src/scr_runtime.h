@@ -1860,6 +1860,8 @@ ScrArr *scr_process_argv(void);
 int scr_lib_arg_count(void);
 const char *scr_lib_arg(int i);
 ScrStr *scr_process_platform(void); /* +1 interned ("darwin", "linux", ...) */
+ScrStr *scr_process_title(void); /* +1, mutable process.title value */
+void scr_process_title_set(ScrStr *value); /* borrowed; best-effort OS title */
 ScrStr *scr_process_cwd(void);      /* +1 fresh (getcwd) */
 /* Submit one raw chunk to fd 1/2 and flush it before returning. Used by all
  * JavaScript-visible console/process/readline/island output paths so the
@@ -2450,6 +2452,8 @@ ScrStr *scr_url_protocol(ScrUrl *u); /* +1 "https:" */
 ScrStr *scr_url_host(ScrUrl *u);     /* +1 "host[:port]" (defaults stripped) */
 ScrStr *scr_url_hostname(ScrUrl *u); /* +1 port-less host ("" when none) */
 ScrStr *scr_url_pathname(ScrUrl *u); /* +1 */
+void scr_url_set_protocol(ScrUrl *u, ScrStr *value); /* borrowed */
+void scr_url_set_pathname(ScrUrl *u, ScrStr *value); /* borrowed */
 ScrStr *scr_url_href(ScrUrl *u);     /* +1; also toString() */
 ScrStr *scr_url_to_path(ScrUrl *u);      /* +1, or throws */
 ScrStr *scr_url_str_to_path(ScrStr *s);  /* +1, or throws */

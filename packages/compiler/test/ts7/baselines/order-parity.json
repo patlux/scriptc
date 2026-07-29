@@ -7857,6 +7857,79 @@
     "<repo>/tests/fixtures/node-types/stream-capture.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/2637-undefined-or-value-returns.ts": {
+   "order": [
+    "<repo>/tests/corpus/2637-undefined-or-value-returns.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2638-top-array-shift.ts": {
+   "order": [
+    "<repo>/tests/corpus/2638-top-array-shift.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2647-array-method-values.ts": {
+   "order": [
+    "<repo>/tests/corpus/2647-array-method-values.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2648-computed-async-iterator.ts": {
+   "order": [
+    "<repo>/tests/corpus/2648-computed-async-iterator.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2649-regex-unicode-sets.ts": {
+   "order": [
+    "<repo>/tests/corpus/2649-regex-unicode-sets.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2651-import-meta-url/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2651-import-meta-url/nested space/child.ts",
+    "<repo>/tests/corpus/2651-import-meta-url/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2652-array-shift-callable-record.ts": {
+   "order": [
+    "<repo>/tests/corpus/2652-array-shift-callable-record.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2653-nullish-member-assignment.ts": {
+   "order": [
+    "<repo>/tests/corpus/2653-nullish-member-assignment.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2654-member-assignment.ts": {
+   "order": [
+    "<repo>/tests/corpus/2654-member-assignment.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/import-meta-unsupported/main.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/import-meta-unsupported/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/member-assignment.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/member-assignment.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/nullish-assignment.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/nullish-assignment.ts"
+   ],
+   "diags": []
   }
  }
 }

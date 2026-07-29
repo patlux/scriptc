@@ -112,6 +112,9 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // one helper returns number-or-undefined, and a second returns only
     // undefined. Both must settle on valid IR representations.
     ["status-unit-static", "status-unit-cli.ts"],
+    // OpenAI-style runScriptcMain shape: process title/env mutations,
+    // URL protocol/pathname setters, and result/header property writes.
+    ["assignment-shape-static", "assignment-shape-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, [pkg]);
@@ -121,6 +124,17 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     ]);
     expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+  }, 120_000);
+
+  test("assignment-shaped npm package is fully static with no runtime fences", () => {
+    const entry = join(pilotRoot, "assignment-shape-cli.ts");
+    const { coverage } = analyze(entry, { npmStatic: ["assignment-shape-static"] });
+    expect(coverage.npmStatic).toEqual([{ package: "assignment-shape-static", status: "static" }]);
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.diagnostics).toHaveLength(0);
+    expect(coverage.runtimeFences ?? []).toHaveLength(0);
+    expect(coverage.stats.statementsFailed).toBe(0);
+    expect(coverage.stats.statementsIsland).toBe(0);
   }, 120_000);
 
   test.for([undefined, "c"] as const)(

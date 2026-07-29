@@ -6542,6 +6542,254 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     );
   }
 
+/** The builtin mutable-property slice that is not represented by a normal
+   * field target. Null means the generic statement machinery should keep
+   * routing the write. Receiver-before-RHS order is explicit for URL values. */
+export function lowerBuiltinPropertyAssignStmt(L: Lowerer, expr: ts.BinaryExpression): IrStmt | null {
+  if (!ts.isPropertyAccessExpression(expr.left) || expr.left.questionDotToken) return null;
+  const access = expr.left;
+  const loc = locOf(expr);
+  if (L.stdlibGlobalMember(access, "process") === "title") {
+    const value = L.lowerExprExpecting(expr.right, STRING);
+    return { kind: "exprStmt", expr: { kind: "libCall", fn: "process.titleSet", args: [value], type: VOID, loc }, loc };
+  }
+  const receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+  if (receiverIr?.kind === "url" && L.isStdlibMember(access) &&
+      (access.name.text === "protocol" || access.name.text === "pathname")) {
+    const receiver = L.lowerExpr(access.expression);
+    const value = L.lowerExprExpecting(expr.right, STRING);
+    return {
+      kind: "exprStmt",
+      expr: {
+        kind: "libCall",
+        fn: access.name.text === "protocol" ? "url.protocolSet" : "url.pathnameSet",
+        args: [receiver, value],
+        type: VOID,
+        loc,
+      },
+      loc,
+    };
+  }
+  return null;
+}
+
+/** Capture RHS once, perform a stable write, and yield the assigned value.
+ * `prefix` has already captured receiver/key in JS reference order. */
+function assignmentSeq(
+  L: Lowerer,
+  prefix: IrStmt[],
+  rhs: IrExpr,
+  write: (value: IrExpr) => IrStmt,
+  loc: SrcLoc,
+): IrExpr {
+  const value = L.declareHiddenLocal("%setVal", rhs.type);
+  const valueRef: IrExpr = { kind: "varRef", localId: value.id, type: rhs.type, loc };
+  return {
+    kind: "seqExpr",
+    stmts: [...prefix, { kind: "varDecl", localId: value.id, init: rhs, loc }, write(valueRef)],
+    result: valueRef,
+    type: rhs.type,
+    loc,
+  };
+}
+
+/** Plain member assignment in expression position. This is the stable
+ * Reference form: receiver, computed key, then RHS, each exactly once;
+ * setters/storage run after RHS and the coerced representable assignment
+ * value is yielded. Island/proxy storage deliberately stays outside this
+ * path. */
+export function lowerMemberAssignExpr(L: Lowerer, expr: ts.BinaryExpression): IrExpr | null {
+  if (expr.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null;
+  const left = expr.left;
+  const loc = locOf(expr);
+
+  if (ts.isPropertyAccessExpression(left) && !left.questionDotToken) {
+    if (L.stdlibGlobalMember(left, "process") === "title") {
+      const rhs = L.lowerExprExpecting(expr.right, STRING);
+      return assignmentSeq(
+        L,
+        [],
+        rhs,
+        (value) => ({ kind: "exprStmt", expr: { kind: "libCall", fn: "process.titleSet", args: [value], type: VOID, loc }, loc }),
+        loc,
+      );
+    }
+    if (L.isProcessEnv(left.expression)) {
+      const rhs = L.lowerExprExpecting(expr.right, STRING);
+      const key: IrExpr = { kind: "strLit", value: left.name.text, type: STRING, loc: locOf(left.name) };
+      return assignmentSeq(
+        L,
+        [],
+        rhs,
+        (value) => ({ kind: "exprStmt", expr: { kind: "libCall", fn: "process.envSet", args: [key, value], type: VOID, loc }, loc }),
+        loc,
+      );
+    }
+    const receiverIr = L.mapTypeOf(L.typeOf(left.expression));
+    if (receiverIr?.kind === "url" && L.isStdlibMember(left) &&
+        (left.name.text === "protocol" || left.name.text === "pathname")) {
+      const receiver = L.lowerExpr(left.expression);
+      const recv = L.declareHiddenLocal("%setRecv", receiver.type);
+      const recvRef: IrExpr = { kind: "varRef", localId: recv.id, type: receiver.type, loc: locOf(left.expression) };
+      const rhs = L.lowerExprExpecting(expr.right, STRING);
+      return assignmentSeq(
+        L,
+        [{ kind: "varDecl", localId: recv.id, init: receiver, loc }],
+        rhs,
+        (value) => ({
+          kind: "exprStmt",
+          expr: {
+            kind: "libCall",
+            fn: left.name.text === "protocol" ? "url.protocolSet" : "url.pathnameSet",
+            args: [recvRef, value],
+            type: VOID,
+            loc,
+          },
+          loc,
+        }),
+        loc,
+      );
+    }
+    const target = L.fieldTarget(left);
+    if (target) {
+      const recv = L.declareHiddenLocal("%setRecv", target.obj.type);
+      const recvRef: IrExpr = { kind: "varRef", localId: recv.id, type: target.obj.type, loc: locOf(left.expression) };
+      const stable = { ...target, obj: recvRef };
+      const rhs = L.lowerExprExpecting(expr.right, target.fieldType);
+      return assignmentSeq(
+        L,
+        [{ kind: "varDecl", localId: recv.id, init: target.obj, loc }],
+        rhs,
+        (value) => L.fieldSetStmt(stable, value, loc, left),
+        loc,
+      );
+    }
+    const receiver = probeLower(L, left.expression);
+    if (receiver?.type.kind === "dyn") {
+      const recv = L.declareHiddenLocal("%setRecv", DYN);
+      const recvRef: IrExpr = { kind: "varRef", localId: recv.id, type: DYN, loc: locOf(left.expression) };
+      const rhs = L.lowerExpr(expr.right);
+      return assignmentSeq(
+        L,
+        [{ kind: "varDecl", localId: recv.id, init: receiver, loc }],
+        rhs,
+        (value) => {
+          const stored = L.coerceToExpected(value, DYN);
+          if (stored.type.kind !== "dyn") {
+            L.unsupported("SC1101", expr.right, `assigning '${L.fmt(rhs.type)}' values into a checked-dynamic member`);
+          }
+          const key: IrExpr = { kind: "strLit", value: left.name.text, type: STRING, loc: locOf(left.name) };
+          return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [recvRef, key, stored], type: VOID, loc }, loc };
+        },
+        loc,
+      );
+    }
+    return null;
+  }
+
+  if (!ts.isElementAccessExpression(left) || left.questionDotToken) return null;
+
+  if (L.isProcessEnv(left.expression)) {
+    const rawKey = L.lowerExpr(left.argumentExpression);
+    if (rawKey.type.kind !== "string") {
+      L.unsupported("SC1090", left.argumentExpression, "indexing process.env with non-string keys");
+    }
+    const key = L.declareHiddenLocal("%setKey", STRING);
+    const keyRef: IrExpr = { kind: "varRef", localId: key.id, type: STRING, loc: locOf(left.argumentExpression) };
+    const rhs = L.lowerExprExpecting(expr.right, STRING);
+    return assignmentSeq(
+      L,
+      [{ kind: "varDecl", localId: key.id, init: rawKey, loc }],
+      rhs,
+      (value) => ({ kind: "exprStmt", expr: { kind: "libCall", fn: "process.envSet", args: [keyRef, value], type: VOID, loc }, loc }),
+      loc,
+    );
+  }
+
+  const symbolTarget = symbolFieldTarget(L, left);
+  if (symbolTarget) {
+    const recv = L.declareHiddenLocal("%setRecv", symbolTarget.obj.type);
+    const recvRef: IrExpr = { kind: "varRef", localId: recv.id, type: symbolTarget.obj.type, loc: locOf(left.expression) };
+    const stable = { ...symbolTarget, obj: recvRef };
+    const rhs = L.lowerExprExpecting(expr.right, symbolTarget.fieldType);
+    return assignmentSeq(
+      L,
+      [{ kind: "varDecl", localId: recv.id, init: symbolTarget.obj, loc }],
+      rhs,
+      (value) => L.fieldSetStmt(stable, value, loc, left),
+      loc,
+    );
+  }
+
+  const receiverIr = L.mapTypeOf(L.typeOf(left.expression));
+  // Arrays/typed arrays deliberately stay statement-only: their OOB,
+  // extension, and fixed-length assignment-result semantics need a
+  // dedicated stable-reference primitive rather than the record path.
+  if (receiverIr?.kind === "array" || receiverIr?.kind === "bytes") return null;
+
+  const receiver = probeLower(L, left.expression);
+  if (!receiver) return null;
+  const recv = L.declareHiddenLocal("%setRecv", receiver.type);
+  const recvRef: IrExpr = { kind: "varRef", localId: recv.id, type: receiver.type, loc: locOf(left.expression) };
+  const prefix: IrStmt[] = [{ kind: "varDecl", localId: recv.id, init: receiver, loc }];
+  const literalKey = recordKeyLiteralText(left.argumentExpression) ?? recordKeyTypeLiteralText(L, left.argumentExpression);
+  let key: IrExpr;
+  if (literalKey !== null && (ts.isStringLiteral(left.argumentExpression) || ts.isNumericLiteral(left.argumentExpression))) {
+    key = { kind: "strLit", value: literalKey, type: STRING, loc: locOf(left.argumentExpression) };
+  } else {
+    let raw = L.lowerExpr(left.argumentExpression);
+    const rawLocal = L.declareHiddenLocal("%setRawKey", raw.type);
+    prefix.push({ kind: "varDecl", localId: rawLocal.id, init: raw, loc });
+    const rawRef: IrExpr = { kind: "varRef", localId: rawLocal.id, type: raw.type, loc: locOf(left.argumentExpression) };
+    raw = rawRef;
+    if (raw.type.kind === "f64") raw = L.ensureString(raw, left.argumentExpression);
+    if (receiver.type.kind === "dyn" && (raw.type.kind === "bool" || raw.type.kind === "dyn")) {
+      raw = { kind: "toString", operand: raw, type: STRING, loc: raw.loc };
+    }
+    if (raw.type.kind !== "string") L.unsupported("SC1090", left.argumentExpression, "indexing with non-string or non-number keys");
+    const keyLocal = L.declareHiddenLocal("%setKey", STRING);
+    prefix.push({ kind: "varDecl", localId: keyLocal.id, init: raw, loc });
+    key = { kind: "varRef", localId: keyLocal.id, type: STRING, loc: raw.loc };
+  }
+
+  if (receiver.type.kind === "dyn") {
+    const rhs = L.lowerExpr(expr.right);
+    return assignmentSeq(L, prefix, rhs, (value) => {
+      const stored = L.coerceToExpected(value, DYN);
+      if (stored.type.kind !== "dyn") L.unsupported("SC1101", expr.right, `assigning '${L.fmt(rhs.type)}' values into a checked-dynamic member`);
+      return { kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [recvRef, key, stored], type: VOID, loc }, loc };
+    }, loc);
+  }
+  if (receiver.type.kind !== "record" || receiverIr?.kind !== "record") return null;
+  const shape = L.shapes.get(receiverIr.shapeId);
+  if (!shape) return null;
+  const field = literalKey !== null ? shape.fields.find((candidate) => candidate.name === literalKey) : undefined;
+  if (field) {
+    const rhs = L.lowerExprExpecting(expr.right, field.type);
+    return assignmentSeq(L, prefix, rhs, (value) => ({ kind: "recordSet", obj: recvRef, shapeId: receiverIr.shapeId, field: field.name, value, loc }), loc);
+  }
+  if (shape.tuple || !shape.indexValue) return null;
+  const overflowOnly = literalKey !== null;
+  const writable = overflowOnly ||
+    (shape.indexValue.kind === "dyn"
+      ? shape.fields.every((candidate) => L.dynConvertible(candidate.type))
+      : shape.fields.every((candidate) => typeEquals(candidate.type, shape.indexValue!)));
+  if (!writable) return null;
+  const rhs = L.lowerExpr(expr.right);
+  return assignmentSeq(L, prefix, rhs, (value) => {
+    const stored = L.intoIndexValueSlot(value, shape.indexValue!, expr.right);
+    return {
+      kind: "recordKeySet",
+      obj: recvRef,
+      shapeId: receiverIr.shapeId,
+      key,
+      value: stored,
+      ...(overflowOnly ? { overflowOnly: true as const } : {}),
+      loc,
+    };
+  }, loc);
+}
+
 /** `a[i] = v` in statement position → arraySet (element writes, like local
    * assignment, produce no value in our subset). */
   export function lowerElementWrite(L: Lowerer, expr: ts.BinaryExpression): IrStmt {
@@ -7418,6 +7666,8 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
           const value = L.lowerExprExpecting(expr.right, target.type);
           return { kind: "assignExpr", localId: target.id, value, type: target.type, loc };
         }
+        const memberAssignment = lowerMemberAssignExpr(L, expr);
+        if (memberAssignment) return memberAssignment;
         // `h.k = v` on an ISLAND receiver in VALUE position: the engine
         // property write (setProp throws the engine's TypeErrors on
         // nullish receivers, bridged catchably), the RHS value threaded
@@ -7502,7 +7752,7 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         "SC1090",
         expr,
         op === ts.SyntaxKind.EqualsToken
-          ? "assignment to non-variables as an expression (only `x = e` over a variable yields a value; write property/destructuring assignments as statements)"
+          ? "assignment through this reference as an expression (supported: writable variables, static record/class fields and indices, checked-dynamic members, process.env/title, and URL protocol/pathname; write other property assignments as statements)"
           : "compound assignment as an expression (write `x op= e` as a statement, or spell out `x = x op e`)",
       );
     }

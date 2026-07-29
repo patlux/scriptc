@@ -546,6 +546,83 @@ ScrStr *scr_url_protocol(ScrUrl *u) {
 
 ScrStr *scr_url_pathname(ScrUrl *u) { return scr_str_retain(u->path); }
 
+/* URL.protocol = value. The setter grammar accepts one leading scheme
+ * token and ignores invalid spellings. WHATWG forbids switching between
+ * special and non-special schemes, and forbids changing host-less file:
+ * URLs away from file; accepted schemes lowercase and replace in place. */
+void scr_url_set_protocol(ScrUrl *u, ScrStr *value) {
+  /* Tabs/LF/CR are stripped during URL setter parsing, like constructor
+   * preprocessing; other bytes after the scheme token are tolerated only
+   * when the first one is ':' (the parser then ignores the remainder). */
+  UrlBuf cleaned;
+  ub_init(&cleaned);
+  for (size_t i = 0; i < value->len; i++) {
+    char c = value->data[i];
+    if (c != '\t' && c != '\n' && c != '\r') ub_push(&cleaned, c);
+  }
+  const char *raw = cleaned.data;
+  size_t len = cleaned.len;
+  size_t sl = 0;
+  if (len > 0 && ((raw[0] >= 'a' && raw[0] <= 'z') || (raw[0] >= 'A' && raw[0] <= 'Z'))) {
+    sl = 1;
+    while (sl < len &&
+           ((raw[sl] >= 'a' && raw[sl] <= 'z') || (raw[sl] >= 'A' && raw[sl] <= 'Z') ||
+            (raw[sl] >= '0' && raw[sl] <= '9') || raw[sl] == '+' || raw[sl] == '-' || raw[sl] == '.')) {
+      sl++;
+    }
+  }
+  if (sl == 0 || (sl < len && raw[sl] != ':')) {
+    free(cleaned.data);
+    return;
+  }
+  bool old_special = is_special_scheme(u->scheme->data, u->scheme->len);
+  UrlBuf b;
+  ub_init(&b);
+  for (size_t i = 0; i < sl; i++) {
+    char c = raw[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    ub_push(&b, c);
+  }
+  free(cleaned.data);
+  ScrStr *next = ub_take(&b);
+  bool new_special = is_special_scheme(next->data, next->len);
+  bool old_file = u->scheme->len == 4 && memcmp(u->scheme->data, "file", 4) == 0;
+  if (old_special != new_special || (old_file && u->host->len == 0 && !
+      (next->len == 4 && memcmp(next->data, "file", 4) == 0))) {
+    scr_str_release(next);
+    return;
+  }
+  scr_str_release(u->scheme);
+  u->scheme = next;
+  /* A newly selected default port disappears, as in URL serialization. */
+  const char *dflt = default_port(u->scheme->data, u->scheme->len);
+  if (dflt && u->port->len == strlen(dflt) && memcmp(u->port->data, dflt, u->port->len) == 0) {
+    scr_str_release(u->port);
+    u->port = scr_str_new("", 0);
+  }
+}
+
+/* URL.pathname = value. Opaque paths are not mutable through pathname;
+ * hierarchical URLs root the assigned text, percent-encode it with the
+ * path set, and apply dot-segment normalization. Query/fragment survive. */
+void scr_url_set_pathname(ScrUrl *u, ScrStr *value) {
+  if (!u->has_authority && (u->path->len == 0 || u->path->data[0] != '/')) return;
+  UrlBuf b;
+  ub_init(&b);
+  if (value->len == 0 || value->data[0] != '/') ub_push(&b, '/');
+  ub_append(&b, value->data, value->len);
+  ScrStr *raw = ub_take(&b);
+  bool special = is_special_scheme(u->scheme->data, u->scheme->len);
+  ScrStr *path = parse_rooted_path(raw->data, raw->len, special);
+  scr_str_release(raw);
+  if (path->len == 0 && special) {
+    scr_str_release(path);
+    path = scr_str_new("/", 1);
+  }
+  scr_str_release(u->path);
+  u->path = path;
+}
+
 /* WHATWG host getter: host[:port] — the port only when non-default (the
  * parser already stripped defaults), "" for authority-less URLs. The
  * normalized form findRoute-style authority compares want (lowercased

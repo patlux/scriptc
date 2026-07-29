@@ -106,6 +106,7 @@ static int scr_lib_argc = 0;
 static char **scr_lib_argv = NULL;
 static ScrArr *scr_argv_arr = NULL;    /* interned process.argv */
 static ScrStr *scr_platform_str = NULL; /* interned process.platform */
+static ScrStr *scr_title_str = NULL;    /* mutable process.title */
 static ScrStr *scr_exec_path_str = NULL; /* interned process.execPath */
 static ScrStr *scr_arch_str = NULL;      /* interned process.arch */
 static ScrStr *scr_versions_node_str = NULL; /* interned process.versions.node */
@@ -119,6 +120,8 @@ static void scr_lib_cleanup(void) {
   scr_argv_arr = NULL;
   scr_str_release(scr_platform_str);
   scr_platform_str = NULL;
+  scr_str_release(scr_title_str);
+  scr_title_str = NULL;
   scr_str_release(scr_exec_path_str);
   scr_exec_path_str = NULL;
   scr_str_release(scr_arch_str);
@@ -186,6 +189,54 @@ ScrStr *scr_process_platform(void) {
 #endif
   }
   return scr_str_retain(scr_platform_str);
+}
+
+/* process.title — mutate argv storage like Node/libuv does on POSIX. The
+ * initial writable span runs from argv[0] through the contiguous argv/env
+ * bytes; later reads return exactly the bytes that fit, so truncation is
+ * observable like Node. Non-executable/library contexts keep an owned
+ * string fallback. */
+static size_t scr_process_title_span(void) {
+  if (!scr_lib_argv || scr_lib_argc <= 0 || !scr_lib_argv[0]) return 0;
+  char *base = scr_lib_argv[0];
+  char *end = base + strlen(base);
+  for (int i = 1; i < scr_lib_argc; i++) {
+    if (scr_lib_argv[i] && scr_lib_argv[i] >= base && scr_lib_argv[i] <= end + 1) {
+      char *candidate = scr_lib_argv[i] + strlen(scr_lib_argv[i]);
+      if (candidate > end) end = candidate;
+    }
+  }
+  return (size_t)(end - base);
+}
+
+ScrStr *scr_process_title(void) {
+  if (!scr_title_str) {
+    if (scr_lib_argv && scr_lib_argc > 0 && scr_lib_argv[0]) {
+      scr_title_str = scr_str_new(scr_lib_argv[0], strlen(scr_lib_argv[0]));
+    } else {
+      scr_title_str = scr_str_new("scriptc", 7);
+    }
+  }
+  return scr_str_retain(scr_title_str);
+}
+
+void scr_process_title_set(ScrStr *value) {
+  /* process.argv is a stable JS array, independent of later title writes.
+   * Materialize its snapshot before mutating the backing argv bytes. */
+  ScrArr *argv_snapshot = scr_process_argv();
+  scr_arr_release(argv_snapshot);
+  const char *shown = value->data;
+  size_t shown_len = value->len;
+  size_t span = scr_process_title_span();
+  if (span > 0) {
+    shown_len = shown_len < span ? shown_len : span;
+    memset(scr_lib_argv[0], 0, span);
+    memcpy(scr_lib_argv[0], value->data, shown_len);
+    shown = scr_lib_argv[0];
+  }
+  ScrStr *next = scr_str_new(shown, shown_len);
+  scr_str_release(scr_title_str);
+  scr_title_str = next;
 }
 
 /* process.arch — the compiled binary's OWN architecture, spelled the way

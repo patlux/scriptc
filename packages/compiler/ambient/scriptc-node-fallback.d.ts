@@ -130,6 +130,7 @@ declare const console: {
 declare var process: {
   argv: string[];
   platform: string;
+  title: string;
   /* The binary's OWN architecture ("arm64", "x64") — Node's answer for
    * its own build on the same machine. */
   readonly arch: string;
@@ -1160,8 +1161,8 @@ declare module "node:os" {
  * data: and mailto:) — divergences from the full WHATWG algorithm are
  * documented in SEMANTICS.md. */
 interface URL {
-  readonly protocol: string;
-  readonly pathname: string;
+  protocol: string;
+  pathname: string;
   readonly href: string;
   readonly host: string;
   readonly hostname: string;

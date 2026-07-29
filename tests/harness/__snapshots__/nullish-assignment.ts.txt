@@ -3,4 +3,4 @@ nullish-assignment.ts:5:1 - error SC1090: '??=' on this computed target (require
   4 | const arrayValues: (string | undefined)[] = [];
   5 | arrayValues[0] ??= "x";
     | ^~~~~~~~~~~~~~
-  6 |
+  6 | 

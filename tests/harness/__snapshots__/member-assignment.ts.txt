@@ -1,0 +1,6 @@
+member-assignment.ts:5:17 - error SC1090: assignment through this reference as an expression (supported: writable variables, static record/class fields and indices, checked-dynamic members, process.env/title, and URL protocol/pathname; write other property assignments as statements) is not supported yet
+
+  4 | const values = [1, 2, 3];
+  5 | const result = (values.length = 1);
+    |                 ^~~~~~~~~~~~~~~~~
+  6 | console.log(result);

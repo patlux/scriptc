@@ -2724,6 +2724,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             return finish(`scr_url_hostname(${arg(0)})`);
           case "url.pathname":
             return finish(`scr_url_pathname(${arg(0)})`);
+          case "url.protocolSet":
+            E.line(`scr_url_set_protocol(${arg(0)}, ${arg(1)});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
+          case "url.pathnameSet":
+            E.line(`scr_url_set_pathname(${arg(0)}, ${arg(1)});${E.srcComment(e.loc)}`);
+            return { name: "", type: e.type };
           case "url.href":
             return finish(`scr_url_href(${arg(0)})`);
           case "url.fileURLToPathUrl":
@@ -4852,6 +4858,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           case "process.envSet":
             return finish(`scr_env_set(${arg(0)}, ${arg(1)})`);
+          case "process.title":
+            return finish(`scr_process_title()`);
+          case "process.titleSet":
+            return finish(`scr_process_title_set(${arg(0)})`);
           case "process.envUnset":
             return finish(`scr_env_unset(${arg(0)})`);
           case "process.envPairs":

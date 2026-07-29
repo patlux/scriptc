@@ -231,6 +231,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "url.host": { argTypes: [URL_T], result: STRING },
   "url.hostname": { argTypes: [URL_T], result: STRING },
   "url.pathname": { argTypes: [URL_T], result: STRING },
+  "url.protocolSet": { argTypes: [URL_T, STRING], result: VOID },
+  "url.pathnameSet": { argTypes: [URL_T, STRING], result: VOID },
   "url.href": { argTypes: [URL_T], result: STRING },
   "url.fileURLToPathUrl": { argTypes: [URL_T], result: STRING },
   "url.fileURLToPathStr": { argTypes: [STRING], result: STRING },
@@ -751,6 +753,8 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   // against the module's registry instead.
   "process.envGet": { argTypes: [STRING], result: VOID },
   "process.envSet": { argTypes: [STRING, STRING], result: VOID },
+  "process.title": { argTypes: [], result: STRING },
+  "process.titleSet": { argTypes: [STRING], result: VOID },
   "process.envUnset": { argTypes: [STRING], result: VOID },
   "process.envPairs": { argTypes: [], result: arrayOf(STRING) },
   "process.exit": { argTypes: [F64], result: VOID },

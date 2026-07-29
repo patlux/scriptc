@@ -1554,6 +1554,13 @@
       "note": "the plain-sample and previous-value diff forms are one surface"
     },
     {
+      "id": "node-builtin.process.title",
+      "kind": "node-builtin",
+      "name": "process.title",
+      "status": "static",
+      "note": "read/write of the argv-backed process title"
+    },
+    {
       "id": "node-builtin.process.umask",
       "kind": "node-builtin",
       "name": "process.umask",
@@ -2503,6 +2510,18 @@
       "name": "string.prototype.trimStart",
       "status": "static",
       "note": "the lowered call form takes no arguments"
+    },
+    {
+      "id": "stdlib.url.pathname-set",
+      "kind": "stdlib",
+      "name": "URL.pathname assignment",
+      "status": "static"
+    },
+    {
+      "id": "stdlib.url.protocol-set",
+      "kind": "stdlib",
+      "name": "URL.protocol assignment",
+      "status": "static"
     },
     {
       "id": "syntax.class-declarations-inside-functions",
