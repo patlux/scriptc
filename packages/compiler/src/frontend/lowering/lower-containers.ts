@@ -25,6 +25,19 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     const name = access.name.text;
     if (!ARRAY_METHODS.has(name) && name !== "sort" && name !== "shift" && name !== "splice") return null;
     let receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+    // Inside an npm-static implicit-any instance the checker can leave a
+    // WHOLE call chain typed `any` even after typeOf has rebound the root
+    // parameter (`entrypoint.split(...).map(...)`). Under --dynamic that
+    // stale spelling maps to jsval, but the VALUE produced by the previous
+    // direct intrinsic is a real static array. Probe that value and keep the
+    // chain on the ordinary array-call path; no array method VALUE is
+    // created, and the receiver still appears only once in emitted IR.
+    // Outside implicit instantiation, a jsval receiver belongs to the
+    // engine and keeps the island path below.
+    if (receiverIr?.kind === "jsval" && L.implicitParamTypes !== null) {
+      const probe = probeLower(L, access.expression);
+      if (probe?.type.kind === "array") receiverIr = probe.type;
+    }
     // A checker-`any[]` receiver (the readonly-array Array.isArray quirk)
     // whose VALUE lowers to a real static array (maybeNarrow's isArray
     // bridge): ride the ordinary tables on the lowered element type — the
@@ -4456,14 +4469,28 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     // is `any`, so the type/symbol gates don't apply — the dyn value's
     // methods can only BE the string intrinsics.
     if (dynReceiver === undefined) {
-      const receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+      let receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+      let probedImplicit = false;
+      // The array twin above: an npm-static implicit-any root may leave a
+      // chained string-producing call checker-typed `any` under --dynamic.
+      // The previous direct intrinsic nevertheless lowers to a real string;
+      // recognize that value here rather than treating the property callee
+      // as an island-held function value. Re-lowering only rebuilds IR; the
+      // emitted receiver still evaluates once.
+      if (receiverIr?.kind === "jsval" && L.implicitParamTypes !== null) {
+        const probe = probeLower(L, access.expression);
+        if (probe?.type.kind === "string") {
+          receiverIr = probe.type;
+          probedImplicit = true;
+        }
+      }
       // `require.main?.filename.startsWith(...)`: the checker types the
       // receiver `string | undefined` (the chain's short-circuit arm), but
       // the entry-module fold lowers it to a compile-time STRING — the
       // suite harness's skip() shape. Everything else keeps the strict
       // string gate.
       if (receiverIr?.kind !== "string" && !isRequireMainFilename(L, access.expression)) return null;
-      if (!L.isStdlibMember(access)) return null;
+      if (!probedImplicit && !L.isStdlibMember(access)) return null;
     }
     // The lib declares optional parameters beyond the lowered forms
     // (includes/startsWith/endsWith take a position); fence the unlowered

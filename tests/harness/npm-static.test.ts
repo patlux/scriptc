@@ -54,6 +54,7 @@ async function buildStatic(
   entry: string,
   npmStatic: string[] | "auto",
   backend: "c" | undefined = "c",
+  dynamic = false,
 ): Promise<string> {
   const hash = createHash("sha256");
   const inputs = [
@@ -66,6 +67,7 @@ async function buildStatic(
   const key = hash
     .update(npmStatic === "auto" ? "auto" : npmStatic.join(","))
     .update(sanitize ? "san" : "plain")
+    .update(dynamic ? "dynamic" : "static")
     .update(backend ?? "default")
     .digest("hex")
     .slice(0, 16);
@@ -75,6 +77,7 @@ async function buildStatic(
     outPath: join(outDir, "program"),
     outDir,
     sanitize,
+    dynamic,
     npmStatic,
     // Pinned: the suite pins --npm-static's FRONTEND frontier (coverage
     // numbers, fence sites); the backend lane is held fixed so those pins
@@ -115,6 +118,11 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // OpenAI-style runScriptcMain shape: process title/env mutations,
     // URL protocol/pathname setters, and result/header property writes.
     ["assignment-shape-static", "assignment-shape-cli.ts"],
+    // The coding-agent package-layout startup shape: direct String methods
+    // in a ternary, followed by split/map/find. Under --dynamic the
+    // implicit-any instance must keep those as bound direct calls rather
+    // than reading prototype methods as values.
+    ["package-layout-static", "package-layout-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, [pkg]);
@@ -136,6 +144,21 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.stats.statementsFailed).toBe(0);
     expect(coverage.stats.statementsIsland).toBe(0);
   }, 120_000);
+
+  test.for([undefined, "c"] as const)(
+    "package-layout direct calls stay static with the island enabled (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "package-layout-cli.ts");
+      const binary = await buildStatic(entry, ["package-layout-static"], backend, true);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
 
   test.for([undefined, "c"] as const)(
     "default-object npm package preserves retryCount presence (%s backend)",

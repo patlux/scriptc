@@ -1,0 +1,6 @@
+string-method-extraction.ts:2:19 - error SC1090: string methods as values (call 'includes' directly) are not supported yet
+
+  1 | const value = "alpha";
+  2 | const extracted = value.includes;
+    |                   ^~~~~~~~~~~~~~
+  3 | console.log(extracted("a"));
