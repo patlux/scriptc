@@ -641,6 +641,14 @@ export class CEmitter {
     }
     if ((this.mod.ffiImports?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
+    // Generator vtable adapters are emitted before the async/generator
+    // scaffolding definitions, so their spawn-wrapper calls need forward
+    // declarations beside the raw body signatures.
+    for (const fn of this.mod.functions) {
+      if (fn.generator === undefined) continue;
+      const params = fn.params.map((p) => cDecl(p.type, mangleLocal(p.localId)));
+      out.push(`static ScrGen *${mangleGenSpawn(fn.name)}(${params.join(", ") || "void"});`);
+    }
     // Class objects (classes as values): construct-thunk prototypes plus
     // the immortal statics that take their addresses — after the function
     // signatures (the thunks call sc_new_*/the constructors), before

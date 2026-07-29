@@ -5237,7 +5237,8 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (!node.body) L.unsupported("SC1090", node, "function overload signatures");
     if (
       node.asteriskToken &&
-      node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+      node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) &&
+      !ts.isMethodDeclaration(node)
     ) {
       L.unsupported("SC1071", node, "async generators (async function*)");
     }
@@ -8673,6 +8674,52 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     else L.noteEdge(`%${found.declarer.def.name}.${method}`);
     const receiver = L.lowerExpr(access.expression);
     const args = L.completeArgs(call.arguments, found.sig.params, locOf(call), call);
+    // Generator methods direct-call through their emitted spawn wrapper.
+    // A virtual slot cannot point at the raw body (its return is TReturn),
+    // so dispatch uses a synthetic ordinary wrapper per concrete method;
+    // noteVirtualEdge keeps every reachable override body emitted.
+    if (found.sig.gen !== undefined && L.overrideBelow(info, method)) {
+      const key = `gen:${info.def.name}:${method}`;
+      let helper = L.genericDispatchHelpers.get(key);
+      if (!helper) {
+        helper = `%gdispatch.${L.genericDispatchHelpers.size}`;
+        L.genericDispatchHelpers.set(key, helper);
+        const recvT: IrType = { kind: "object", className: info.def.name };
+        const recvRef: IrExpr = { kind: "varRef", localId: "this.0", type: recvT, loc: locOf(call) };
+        const argRefs = found.sig.params.map((p, i): IrExpr => ({
+          kind: "varRef",
+          localId: `arg${i}.0`,
+          type: p.type,
+          loc: locOf(call),
+        }));
+        L.liftedFns.push({
+          name: helper,
+          params: [
+            { localId: "this.0", name: "this", type: recvT },
+            ...found.sig.params.map((p, i) => ({ localId: `arg${i}.0`, name: `arg${i}`, type: p.type })),
+          ],
+          returnType: found.sig.ret,
+          locals: [
+            { id: "this.0", name: "this", type: recvT, mutable: false },
+            ...found.sig.params.map((p, i) => ({ id: `arg${i}.0`, name: `arg${i}`, type: p.type, mutable: false })),
+          ],
+          body: [{
+            kind: "return",
+            value: {
+              kind: "virtualCall",
+              className: info.def.name,
+              method,
+              args: [recvRef, ...argRefs],
+              type: found.sig.ret,
+              loc: locOf(call),
+            },
+            loc: locOf(call),
+          }],
+          loc: locOf(call),
+        });
+      }
+      return { kind: "call", callee: helper, args: [L.upcastTo(receiver, info.def.name), ...args], type: found.sig.ret, loc: locOf(call) };
+    }
     if (L.overrideBelow(info, method)) {
       return reconcileOverloadReturn(L, call, {
         kind: "virtualCall",

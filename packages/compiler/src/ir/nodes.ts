@@ -1052,7 +1052,8 @@ export interface IrFunction {
    * generator type `{ yieldT, retT: returnType, nextT }` from an emitted
    * spawn wrapper that only allocates. `yieldT` is what `yield e` sends
    * out, `nextT` what `.next(v)` sends in (the yield expression's result
-   * type). Mutually exclusive with `async` (async generators are fenced). */
+   * type). Public async-generator methods set both flags: the generator
+   * spawn ABI remains the call surface, while await is legal in the body. */
   generator?: { yieldT: IrType; nextT: IrType };
   body: IrStmt[];
   loc: SrcLoc;

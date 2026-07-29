@@ -1828,7 +1828,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   //                    argument — fenced at the call).
   // Mixed dyn/concrete channels stay unmapped: the shared result record's
   // value slot would need a dyn union arm, which does not exist.
-  if (isStdlibInterface("Generator") || isStdlibInterface("IterableIterator")) {
+  if (
+    isStdlibInterface("Generator") || isStdlibInterface("IterableIterator") ||
+    isStdlibInterface("AsyncGenerator") || isStdlibInterface("AsyncIterableIterator")
+  ) {
     const args = checker.getTypeArguments(widened as ts.TypeReference);
     const channels = genChannels(args[0], args[1], args[2], ctx);
     if (!channels) return null;

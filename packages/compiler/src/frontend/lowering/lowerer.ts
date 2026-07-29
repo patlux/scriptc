@@ -918,6 +918,10 @@ export class Lowerer {
    * receiver class — the eager drain of a class iterable's protocol into
    * a fresh element array, behind array/call spreads. */
   readonly iterDrainHelpers = new Map<string, string>();
+  /** Per-instantiation dispatch helpers for inherited generic methods with
+   * sound non-generic overrides. Keyed by static receiver + method +
+   * generic instance; see lowerClassGenericMethodCall. */
+  readonly genericDispatchHelpers = new Map<string, string>();
   /** Island-lift builder helpers (%jsin.rec.N / %jsin.arr.N /
    * %jsin.elems.N), interned per source type — see jsvalLiftExpr. */
   readonly jsinHelpers = new Map<string, string>();
@@ -5960,7 +5964,7 @@ export class Lowerer {
   /* ── the class graph (single inheritance) ─────────────────────────── */
 
   findMethodOn(info: ClassInfo | null,
-    name: string,): { declarer: ClassInfo; sig: { params: ParamShape[]; ret: IrType; abstract?: true; async?: true } } | null {
+    name: string,): { declarer: ClassInfo; sig: { params: ParamShape[]; ret: IrType; abstract?: true; async?: true; gen?: { yieldT: IrType; nextT: IrType } } } | null {
     return findMethodOn(this, info, name);
   }
 

@@ -8,3 +8,4 @@ class UpperStream extends EventStream {
 
 const stream = new UpperStream("event:");
 console.log(stream.upper("ready"));
+void stream.consume();

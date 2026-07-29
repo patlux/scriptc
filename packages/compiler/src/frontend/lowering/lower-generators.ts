@@ -217,6 +217,7 @@ export function lowerForOfGenerator(
   stmt: ts.ForOfStatement,
   iterable: IrExpr & { type: GenType },
   labels?: string[],
+  asyncIteration = false,
 ): IrStmt {
   if (!ts.isVariableDeclarationList(stmt.initializer)) {
     L.unsupported(
@@ -275,11 +276,28 @@ export function lowerForOfGenerator(
       ? L.declareHiddenLocal("%vof", genT.yieldT)
       : L.declareLocal(decl.name, decl.name.text, genT.yieldT, isLet);
     const xRef: IrExpr = { kind: "varRef", localId: x.id, type: genT.yieldT, loc };
+    const nextResume: IrExpr = { kind: "genResume", mode: "next", gen: gRef(), arg: null, type: recT, loc };
+    const asyncHop = (value: IrExpr): IrExpr => {
+      if (!asyncIteration) return value;
+      const promiseT: IrType = { kind: "promise", inner: value.type };
+      return {
+        kind: "awaitExpr",
+        value: {
+          kind: "intrinsic",
+          name: "promise.resolve",
+          args: [value],
+          type: promiseT,
+          loc,
+        },
+        type: value.type,
+        loc,
+      };
+    };
     const head: IrStmt[] = [
       {
         kind: "varDecl",
         localId: r.id,
-        init: { kind: "genResume", mode: "next", gen: gRef(), arg: null, type: recT, loc },
+        init: asyncHop(nextResume),
         loc,
       },
       {
@@ -331,7 +349,7 @@ export function lowerForOfGenerator(
           then: [
             {
               kind: "exprStmt",
-              expr: { kind: "genResume", mode: "return", gen: gRef(), arg: null, type: recT, loc },
+              expr: asyncHop({ kind: "genResume", mode: "return", gen: gRef(), arg: null, type: recT, loc }),
               loc,
             },
           ],

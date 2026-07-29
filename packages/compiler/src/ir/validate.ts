@@ -1112,9 +1112,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (functionsByName.has(fn.name)) {
       errors.push({ message: `duplicate function "${fn.name}"`, loc: fn.loc });
     }
-    if (fn.async && fn.generator !== undefined) {
-      errors.push({ message: `function "${fn.name}" is both async and a generator (async generators are fenced)`, loc: fn.loc });
-    }
     functionsByName.set(fn.name, fn);
   }
   const ffiByName = new Map<string, NonNullable<IrModule["ffiImports"]>[number]>();
@@ -4485,7 +4482,7 @@ function validateFunction(
         } else if (!typeEquals(e.type, e.value.type.inner)) {
           err(`await type ${e.type.kind} != promise inner ${e.value.type.inner.kind}`, e.loc);
         }
-        if (!fn.async) err("await outside an async function", e.loc);
+        if (!fn.async && fn.generator === undefined) err("await outside an async function or async generator", e.loc);
         break;
       }
       case "yieldExpr": {
@@ -4584,7 +4581,7 @@ function validateFunction(
             );
           if (!covered) err("awaitUnion result union misses an arm", e.loc);
         }
-        if (!fn.async) err("await outside an async function", e.loc);
+        if (!fn.async && fn.generator === undefined) err("await outside an async function or async generator", e.loc);
         break;
       }
       case "newPromise": {

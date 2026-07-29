@@ -47,11 +47,12 @@ export interface ClassInfo {
   /** OWN GENERIC instance methods (own type parameters — `m<T>(x: T)`),
    * monomorphized per call site like top-level generic functions: instance
    * `n` is the module function `%C.m%n` taking `this` as param 0. They
-   * never enter `methods` (no single ABI signature, no vtable slot), so
-   * dispatch is STATIC — calls resolve the nearest declarer on the
-   * receiver's static class, and a receiver whose runtime class could
-   * override (genericOverrideBelow) must be exact or fences. Inherited
-   * lookups walk the base chain (findGenericMethodOn). */
+   * never enter `methods` (no single ABI signature, no vtable slot).
+   * Calls normally dispatch statically; a non-generic override may join a
+   * per-instantiation virtual slot only when its one concrete ABI exactly
+   * matches the instantiated generic ABI (genericOverrideBelow plus the
+   * dispatch-plan helpers). Ambiguous/mismatched mixes stay fail-closed.
+   * Inherited lookups walk the base chain (findGenericMethodOn). */
   genericMethods?: Map<string, GenericFnInfo>;
   /** OWN GENERIC static methods — `%C.static:m%n` module functions, the
    * generic twin of staticMethods (same this/super fence, same
@@ -1601,25 +1602,15 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         } else if (ts.isMethodDeclaration(member)) {
           const mName = classMemberNameOf(L, member.name);
           if (mName === null) L.unsupported("SC1090", member, "computed method names");
-          // PUBLIC generator METHODS stay fenced (virtualCall dispatch
-          // over gen-spawn wrappers has no story yet); module-level
-          // function* and object-literal *methods compile — and #PRIVATE
-          // generator methods (`*#walk()`) compile below: privates never
-          // enter vtables (a subclass redeclaration is fenced, so
-          // overrideBelow can never flip), every call is a direct call the
-          // emitter routes through the gen-spawn wrapper with `this` as
-          // param 0 — the async-method precedent, generator form.
-          if (member.asteriskToken !== undefined && !ts.isPrivateIdentifier(member.name)) {
-            L.unsupported(
-              "SC1071",
-              member,
-              "generator methods (a #private generator method compiles — privates never dispatch dynamically; or declare a module-level function* and call it from the method)",
-            );
-          }
-          // An async #private generator (`async *#m()`) is still an async
-          // generator — the blanket SC1071 fence.
+          // Generator methods carry their spawn ABI on the method sig.
+          // Public methods dispatch through per-method wrappers: direct
+          // calls enter the generator spawn, overridden calls use a vtable
+          // slot whose ABI is the generator object. #private sync methods
+          // keep their existing direct path. Public async generators are
+          // represented by the same suspended generator fiber; await inside
+          // that fiber parks on promises and resumes through the event loop.
           if (
-            member.asteriskToken !== undefined &&
+            member.asteriskToken !== undefined && ts.isPrivateIdentifier(member.name) &&
             member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
           ) {
             L.unsupported("SC1071", member, "async generators (async function*)");
@@ -1705,9 +1696,14 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // dispatch STATICALLY — override chains fence (the vtable slot
           // machinery has no fiber-spawn story), so every call site is a
           // direct call the emitter routes through the spawn wrapper.
+          // Async JS methods in npm-static packages collect like typed
+          // methods: the package opted into static source compilation, so
+          // composition-root async helpers must be reachable. Ordinary
+          // user JS keeps the lazy per-call fence stance.
           if (
             member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) &&
-            isJsSourceFile(decl.getSourceFile())
+            isJsSourceFile(decl.getSourceFile()) &&
+            !implicitMonoFile(decl.getSourceFile())
           ) {
             continue;
           }
@@ -1725,8 +1721,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
             ts.isIdentifier(member.name) &&
             inst === undefined && decl.typeParameters === undefined &&
             !fields.has(member.name.text) &&
-            !L.findMethodOn(base, member.name.text) &&
-            !findGenericMethodOn(L, base, member.name.text)
+            !L.findMethodOn(base, member.name.text)
           ) {
             const implicit = implicitAnyParamSymbolsOf(L, member);
             if (implicit) {
@@ -1745,13 +1740,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           if (fields.has(mName)) {
             L.unsupported("SC1090", member.name, "methods shadowing inherited fields");
           }
-          if (findGenericMethodOn(L, base, mName)) {
-            L.unsupported(
-              "SC1090",
-              member.name,
-              `overriding the inherited generic method '${mName}' with a non-generic method (generic methods dispatch statically and would never reach this override)`,
-            );
-          }
+          const overriddenGeneric = findGenericMethodOn(L, base, mName);
           // Symbol-slot return refinement, INHERITED slots (own ctor-declared
           // slots refine in the post-scan pass below — the constructor hasn't
           // been scanned yet here, but base slots are already in
@@ -1770,6 +1759,20 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // against the STATIC receiver's shape, so `m(x?: number)` and
           // `m(x: number | undefined)` interchange soundly in overrides.
           const overridden = L.findMethodOn(base, mName);
+          // A non-generic override of an inherited generic method is
+          // admissible exactly when every call-site instantiation it may
+          // receive has this concrete ABI. Collection records the method;
+          // lowerClassGenericMethodCall proves each instantiated signature
+          // and builds a per-instantiation dispatch helper. If an ordinary
+          // method is inherited under the same name too, the source of
+          // dispatch is ambiguous and remains fenced.
+          if (overriddenGeneric && overridden) {
+            L.unsupported(
+              "SC1090",
+              member.name,
+              `overriding both the inherited generic method and ordinary method '${mName}' (the dispatch source is ambiguous)`,
+            );
+          }
           if (overridden?.declarer.builtinError) {
             // Error.prototype.toString is a runtime implementation with no
             // vtable slot — calls to it are direct, so an override could
@@ -1794,11 +1797,12 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           }
           const asyncMember =
             member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+          const generatorMember = member.asteriskToken !== undefined;
           // Async methods dispatch STATICALLY (the body enters through its
           // fiber spawn wrapper; vtable slots hold raw implementations) —
           // an override chain touching an async method on either end would
           // put a spawn wrapper behind a virtual slot, so it fences.
-          if (overridden && (asyncMember || overridden.sig.async === true)) {
+          if (overridden && (asyncMember || overridden.sig.async === true) && !generatorMember) {
             L.unsupported(
               "SC1090",
               member.name,
@@ -1809,9 +1813,14 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           // the body lowers as a generator IrFunction (`this` as param 0),
           // and every call — direct by construction — enters through the
           // emitted gen-spawn wrapper, answering the suspended generator.
-          if (member.asteriskToken !== undefined) {
+          if (generatorMember) {
             if (ft.ret.kind !== "generator") L.badType(member.name, L.typeOf(member.name));
-            methods.set(mName, { params: shapes, ret: ft.ret, gen: { yieldT: ft.ret.yieldT, nextT: ft.ret.nextT } });
+            methods.set(mName, {
+              params: shapes,
+              ret: ft.ret,
+              gen: { yieldT: ft.ret.yieldT, nextT: ft.ret.nextT },
+              ...(asyncMember ? { async: true as const } : {}),
+            });
           } else {
             methods.set(mName, asyncMember ? { params: shapes, ret: ft.ret, async: true as const } : { params: shapes, ret: ft.ret });
           }
@@ -2316,6 +2325,12 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       }
       if (base) base.subclasses.push(info);
       L.classes.set(className, info);
+      // The checker can synthesize a distinct instance-type symbol for a
+      // class imported from an npm-static JS module. Index that symbol too
+      // so derived program classes map back onto the already-collected
+      // runtime declaration instead of becoming unregistered nominal types.
+      const instanceSym = L.typeOf(decl).getSymbol();
+      if (instanceSym) L.classBySymbol.set(instanceSym, info);
       // A NAMED class binds its name (declarations in their scope, class
       // expressions inside their own bodies — tsc resolves both to this
       // symbol); a nameless default-export declaration binds its module's
@@ -3534,8 +3549,140 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
    * receiver's runtime class is statically exact. */
   export function genericOverrideBelow(L: Lowerer, info: ClassInfo, name: string): boolean {
     return info.subclasses.some(
-      (s) => s.genericMethods?.has(name) === true || genericOverrideBelow(L, s, name),
+      (s) => s.genericMethods?.has(name) === true || s.methods.has(name) || genericOverrideBelow(L, s, name),
     );
+  }
+
+  interface GenericDispatchPlan {
+    /** The concrete implementation for one runtime class subtree. */
+    targets: { className: string; declarer: ClassInfo; callee: string }[];
+  }
+
+  /** A sound per-instantiation dispatch plan for a generic method call.
+   * Generic redeclarations below stay ambiguous: they would choose a
+   * different source body/instantiation family, so the existing exact-
+   * receiver rule owns them. Non-generic overrides are legal when their
+   * concrete ABI exactly matches this generic instance. */
+  function genericDispatchPlan(L: Lowerer, call: ts.CallExpression,
+    recvInfo: ClassInfo, name: string,
+    params: ParamShape[], ret: IrType,): GenericDispatchPlan | null {
+    const targets: GenericDispatchPlan["targets"] = [];
+    const matches = (ps: ParamShape[], r: IrType): boolean =>
+      ps.length === params.length &&
+      ps.every((p, i) => typeEquals(p.type, params[i]!.type)) &&
+      typeEquals(r, ret);
+    const walk = (info: ClassInfo): boolean => {
+      const gm = info !== recvInfo ? info.genericMethods?.get(name) : undefined;
+      if (gm !== undefined) {
+        // An untyped JS override is semantically non-generic, but the
+        // npm-static frontend represents its implicit-any parameters by
+        // per-call instantiation. Instantiate it from this same call's
+        // argument facts; a real source-generic redeclaration remains
+        // ambiguous because its type-parameter substitution belongs to a
+        // different declaration signature.
+        if (gm.implicitParams === undefined) return false;
+        const inst = implicitCallInstance(L, call, gm);
+        if (!matches(inst.params, inst.returnType)) return false;
+        targets.push({ className: info.def.name, declarer: info, callee: inst.name });
+      }
+      const own = info.methods.get(name);
+      if (own !== undefined) {
+        if (own.abstract === true || own.async === true || own.gen !== undefined || !matches(own.params, own.ret)) {
+          return false;
+        }
+        targets.push({ className: info.def.name, declarer: info, callee: `%${info.def.name}.${name}` });
+      }
+      return info.subclasses.every(walk);
+    };
+    return walk(recvInfo) ? { targets } : null;
+  }
+
+  /** One virtual dispatch helper for a generic call instance. The helper
+   * is an ordinary module function with the instantiated ABI. It selects
+   * the nearest matching non-generic override by runtime class interval,
+   * deepest first, and otherwise calls the generic declarer's instance.
+   * This preserves override semantics without putting a polymorphic source
+   * signature into the class vtable. */
+  function genericDispatchCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,
+    recvInfo: ClassInfo,
+    declarer: ClassInfo,
+    instance: { name: string; params: ParamShape[]; returnType: IrType },
+    plan: GenericDispatchPlan,
+    receiver: IrExpr,): IrExpr {
+    const loc = locOf(call);
+    const recvT: IrType = { kind: "object", className: recvInfo.def.name };
+    const key = `${recvInfo.def.name}:${access.name.text}:${instance.name}`;
+    let helper = L.genericDispatchHelpers.get(key);
+    if (!helper) {
+      helper = `%gdispatch.${L.genericDispatchHelpers.size}`;
+      L.genericDispatchHelpers.set(key, helper);
+      const recvRef: IrExpr = { kind: "varRef", localId: "this.0", type: recvT, loc };
+      const argRefs = instance.params.map((p, i): IrExpr => ({
+        kind: "varRef",
+        localId: `arg${i}.0`,
+        type: p.type,
+        loc,
+      }));
+      const body: IrStmt[] = [];
+      const depth = (name: string): number => {
+        let n = 0;
+        for (let c = L.classes.get(name)?.base ?? null; c; c = c.base) n++;
+        return n;
+      };
+      const ordered = [...plan.targets].sort((a, b) => depth(b.className) - depth(a.className));
+      for (const target of ordered) {
+        L.noteEdge(target.callee);
+        body.push({
+          kind: "if",
+          cond: { kind: "instanceOf", className: target.className, value: recvRef, type: BOOL, loc },
+          then: [{
+            kind: "return",
+            value: {
+              kind: "call",
+              callee: target.callee,
+              args: [
+                { kind: "downcast", value: recvRef, type: { kind: "object", className: target.declarer.def.name }, loc },
+                ...argRefs,
+              ],
+              type: instance.returnType,
+              loc,
+            },
+            loc,
+          }],
+          else_: null,
+          loc,
+        });
+      }
+      L.noteEdge(instance.name);
+      body.push({
+        kind: "return",
+        value: {
+          kind: "call",
+          callee: instance.name,
+          args: [L.upcastTo(recvRef, declarer.def.name), ...argRefs],
+          type: instance.returnType,
+          loc,
+        },
+        loc,
+      });
+      L.liftedFns.push({
+        name: helper,
+        params: [
+          { localId: "this.0", name: "this", type: recvT },
+          ...instance.params.map((p, i) => ({ localId: `arg${i}.0`, name: `arg${i}`, type: p.type })),
+        ],
+        returnType: instance.returnType,
+        locals: [
+          { id: "this.0", name: "this", type: recvT, mutable: false },
+          ...instance.params.map((p, i) => ({ id: `arg${i}.0`, name: `arg${i}`, type: p.type, mutable: false })),
+        ],
+        body,
+        loc,
+      });
+    }
+    const args = L.completeArgs(call.arguments, instance.params, loc, call);
+    return { kind: "call", callee: helper, args: [L.upcastTo(receiver, recvInfo.def.name), ...args], type: instance.returnType, loc };
   }
 
 /** The receiver's EXACT runtime class, when the expression proves it: a
@@ -3612,17 +3759,11 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     recvIr?: IrExpr,): IrExpr {
     const name = access.name.text;
     let { declarer, info } = found;
-    if (genericOverrideBelow(L, recvInfo, name)) {
+    const hasOverrideBelow = genericOverrideBelow(L, recvInfo, name);
+    if (hasOverrideBelow) {
       const exact = exactInstanceClassOf(L, access.expression);
       const refound = exact ? findGenericMethodOn(L, exact, name) : null;
-      if (!refound) {
-        L.unsupported(
-          "SC1090",
-          call,
-          `calling the generic method '${name}' through a receiver whose runtime class may override it (a subclass of '${recvInfo.def.name.replace(/^%|^%m\d+\./, "")}' redeclares it and generic methods dispatch statically — bind the receiver to a const initialized with its 'new' expression)`,
-        );
-      }
-      ({ declarer, info } = refound);
+      if (refound) ({ declarer, info } = refound);
     }
     // Implicit-any methods instantiate over the call's ARGUMENT types
     // (there is no resolved generic signature — the untyped params are the
@@ -3633,6 +3774,23 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       : genericCallInstance(L, call, info);
     const receiver = recvIr ?? L.lowerExpr(access.expression);
     const loc = locOf(call);
+    if (hasOverrideBelow) {
+      const plan = genericDispatchPlan(L, call, recvInfo, name, instance.params, instance.returnType);
+      if (plan?.targets.length) {
+        return genericDispatchCall(L, call, access, recvInfo, declarer, instance, plan, receiver);
+      }
+      // An exact receiver with a generic redeclaration below still follows
+      // the original static path. Everything else is ambiguous or ABI-
+      // incompatible and remains fail-closed.
+      const exact = exactInstanceClassOf(L, access.expression);
+      if (!exact || !findGenericMethodOn(L, exact, name)) {
+        L.unsupported(
+          "SC1090",
+          call,
+          `calling the generic method '${name}' through a receiver whose runtime class may override it (a subclass of '${recvInfo.def.name.replace(/^%|^%m\d+\./, "")}' redeclares it and generic methods dispatch statically — bind the receiver to a const initialized with its 'new' expression)`,
+        );
+      }
+    }
     // The declarer sits at/above the receiver's static class on the plain
     // path; the EXACT path can land below it (a base-typed const provably
     // holding the subclass) — that direction is the checker-grade downcast
@@ -4092,7 +4250,8 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
     // spawn's argument pack). Dispatch is static by construction — the
     // override fence at collection keeps async methods out of vtables.
     const isAsync = sig.async === true && sig.ret.kind === "promise";
-    // #PRIVATE GENERATOR methods: the module function is a generator
+    const asyncGenerator = sig.async === true && sig.gen !== undefined;
+    // GENERATOR methods: the module function is a generator
     // IrFunction — the body returns the TReturn channel, yields ride
     // ctx.generator, and every call (direct by construction — privates
     // never virtualize) enters through the emitted gen-spawn wrapper with
@@ -4104,7 +4263,7 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
         ? L.genBodyReturnType(sig.ret)
         : sig.ret;
     const fnCtx = newFnCtx(false, null, null, bodyReturn);
-    fnCtx.isAsync = isAsync;
+    fnCtx.isAsync = isAsync || asyncGenerator;
     if (genCh !== null) fnCtx.generator = genCh;
     L.fnStack.push(fnCtx);
     try {
@@ -4484,7 +4643,9 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
       if (gfound) {
         const thisL = L.resolveThis();
         if (!thisL) L.unsupported("SC1080", access);
-        const instance = genericCallInstance(L, call, gfound.info);
+        const instance = gfound.info.implicitParams
+          ? implicitCallInstance(L, call, gfound.info)
+          : genericCallInstance(L, call, gfound.info);
         const loc = locOf(call);
         const thisRef: IrExpr = { kind: "varRef", localId: thisL.id, type: thisL.type, loc };
         const args = L.completeArgs(call.arguments, instance.params, loc, call);

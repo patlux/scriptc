@@ -32,6 +32,7 @@ import {
   mangleClassTrace,
   mangleCtorThunk,
   mangleFunction,
+  mangleGenSpawn,
   mangleVtInstance,
   mangleVtStruct,
 } from "../mangle.js";
@@ -298,7 +299,9 @@ export function emitClassShapes(
     const entries = vtEntriesFor(meta).map(({ slot, impl }) =>
       impl === null
         ? `ptr null` // outside the declaring subtree / fully-abstract chain
-        : `ptr @${mangleFunction(`%${impl.def.name}.${slot.method}`)}`,
+        : `ptr @${slot.fn.generator !== undefined
+            ? mangleGenSpawn(`%${impl.def.name}.${slot.method}`)
+            : mangleFunction(`%${impl.def.name}.${slot.method}`)}`,
     );
     const head = `%ScrVt { i64 ${meta.pre}, i64 ${meta.post}, ptr @${mangleClassReleaseDirect(cls.name)} }`;
     defs.push(

@@ -135,6 +135,21 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   );
 
   test.for([undefined, "c"] as const)(
+    "inherits npm class facts through three levels and dispatches legal generic overrides (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "status-chain-cli.ts");
+      const binary = await buildStatic(entry, ["status-chain-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test.for([undefined, "c"] as const)(
     "node:module with literal createRequire edges stays statically admitted (%s backend)",
     async (backend) => {
       const entry = join(pilotRoot, "create-require-static-cli.ts");

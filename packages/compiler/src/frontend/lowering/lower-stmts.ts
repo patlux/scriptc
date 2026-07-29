@@ -5577,17 +5577,45 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     // desugars drop them — a labeled jump naming those loops fences at the
     // jump site (no label point exists in their desugared shape).
     const labels = L.takeLabels();
-    // `for await` is ASYNC ITERATION, not the shipped async/await. ONE
-    // async iterable has a lowering: process.stdin (the piped-input
-    // pattern real CLIs use) — see lowerForAwaitStdin. Everything else is
-    // named specifically (the bare SC1070 text would claim async/await
-    // itself is missing).
+    // `for await` is ASYNC ITERATION. Besides the runtime stdin/stream
+    // spokes, class async-generator methods lower to the generator protocol
+    // with an await hop around each resume result.
     if (stmt.awaitModifier) {
       if (
         ts.isPropertyAccessExpression(stmt.expression) &&
         L.stdlibGlobalMember(stmt.expression, "process") === "stdin"
       ) {
         return lowerForAwaitStdin(L, stmt);
+      }
+      {
+        let iterable: IrExpr | null = null;
+        const mapped = L.mapTypeOf(L.typeOf(stmt.expression));
+        if (mapped?.kind === "generator") {
+          iterable = L.lowerExpr(stmt.expression);
+        } else if (mapped?.kind === "object") {
+          const info = L.classes.get(mapped.className);
+          const found = info ? L.findMethodOn(info, "sym:asyncIterator") : null;
+          if (info && found?.sig.gen !== undefined && found.sig.params.length === 0) {
+            const recv = L.lowerExpr(stmt.expression);
+            iterable = L.accessorCall(
+              info.def.name,
+              "sym:asyncIterator",
+              recv,
+              [],
+              found.sig.ret,
+              locOf(stmt.expression),
+            );
+          }
+        }
+        if (iterable?.type.kind === "generator") {
+          return lowerForOfGenerator(
+            L,
+            stmt,
+            iterable as IrExpr & { type: IrType & { kind: "generator" } },
+            labels,
+            true,
+          );
+        }
       }
       // Readable streams (the readableAsyncIterator surface): the mapped
       // receiver class roots at a readable-sided stream class.

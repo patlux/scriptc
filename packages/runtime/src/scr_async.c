@@ -282,6 +282,8 @@ struct ScrFiber {
                         * for generator fibers (gen non-NULL instead) */
   ScrGen *gen;         /* the generator this fiber runs (borrowed — the
                         * ScrGen owns the fiber, never the reverse) */
+  bool gen_awaiting;   /* generator fiber parked on a promise: its next
+                        * consumer resume waits until the loop wakes it */
   ScrExcCell exc;
   /* AsyncLocalStorage context (owned; NULL = empty). Inherited from the
    * SPAWNER at spawn (Node's init-time capture), swapped active with the
@@ -1205,7 +1207,9 @@ static void scr_await_park(ScrPromise *p) {
     if (!p->waiters) scr_oom();
   }
   p->waiters[p->nwaiters++] = self;
+  if (self->gen != NULL) self->gen_awaiting = true;
   scr_switch(&self->ctx, self->return_to, NULL);
+  if (self->gen != NULL) self->gen_awaiting = false;
   /* Resumed by the loop: return_to must now point at the loop's context. */
 }
 
@@ -1221,7 +1225,9 @@ static void scr_await_yield(void) {
     abort();
   }
   scr_ready_push(self);
+  if (self->gen != NULL) self->gen_awaiting = true;
   scr_switch(&self->ctx, self->return_to, NULL);
+  if (self->gen != NULL) self->gen_awaiting = false;
 }
 
 /* The emitted promise-or-absent await's unit arm (`await u` where u holds
@@ -1595,7 +1601,7 @@ static void scr_resume_fiber(ScrFiber *f) {
 #endif
   f->return_to = &scr_loop_ctx;
   scr_switch(&scr_loop_ctx, &f->ctx, f);
-  if (f->done) {
+  if (f->done && f->gen == NULL) {
     scr_promise_release(f->promise);
     scr_fiber_destroy(f);
     scr_fibers_live--;
@@ -2548,6 +2554,15 @@ static void scr_gen_switch_in(ScrGen *g) {
    * yield/finish switch targeted NULL — main's cell). */
   scr_current = me;
   scr_exc_swap_cell(me != NULL ? &me->exc : NULL);
+  while (f->gen_awaiting && !f->done) {
+    /* An async-generator body parked at await, not at yield/completion.
+     * Drive event-loop work until this generator is woken. The loop may
+     * exhaust while an external source remains pending; that is the same
+     * abandoned-fiber outcome as an ordinary async body with no live
+     * handles. */
+    scr_loop_run();
+    if (f->gen_awaiting) break;
+  }
   if (f->done) {
     g->state = SCR_GEN_DONE;
     if (f->exc.kind != SCR_EXC_NONE) {

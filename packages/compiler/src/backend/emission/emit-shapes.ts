@@ -367,7 +367,7 @@ export interface ClassMeta {
       out.push(`typedef struct ${vtt} { /* vtable: hierarchy rooted at ${root.def.name} */`);
       out.push(`  ScrVt head;`);
       for (const slot of root.slots) {
-        const ret = cType(slot.fn.returnType).trim();
+        const ret = slot.fn.generator !== undefined ? "ScrGen *" : cType(slot.fn.returnType).trim();
         out.push(
           `  ${ret} (*${slot.member})(${E.vtSlotParams(slot, false).join(", ")}); /* ${slot.method} */`,
         );
@@ -381,7 +381,7 @@ export interface ClassMeta {
         const key = `${impl.def.name}.${slot.method}`;
         if (E.vtAdapters.has(key)) continue;
         E.vtAdapters.set(key, { impl, slot });
-        const ret = cType(slot.fn.returnType).trim();
+        const ret = slot.fn.generator !== undefined ? "ScrGen *" : cType(slot.fn.returnType).trim();
         out.push(
           `static ${ret} ${mangleVtAdapter(impl.def.name, slot.method)}(${E.vtSlotParams(slot, false).join(", ")});`,
         );
@@ -414,11 +414,11 @@ export interface ClassMeta {
    * class's method behind the slot's declaring-class signature. */
   export function emitVtAdapterDefs(E: CEmitter, out: string[]): void {
     for (const { impl, slot } of E.vtAdapters.values()) {
-      const ret = cType(slot.fn.returnType).trim();
+      const ret = slot.fn.generator !== undefined ? "ScrGen *" : cType(slot.fn.returnType).trim();
       const recv =
         impl === slot.declarer ? "o" : `(${mangleClassStruct(impl.def.name)} *)o`;
       const args = [recv, ...slot.fn.params.slice(1).map((_, i) => `sc_a${i}`)].join(", ");
-      const call = `${mangleFunction(`%${impl.def.name}.${slot.method}`)}(${args})`;
+      const call = `${E.callTargetC(`%${impl.def.name}.${slot.method}`)}(${args})`;
       out.push(
         ``,
         `static ${ret} ${mangleVtAdapter(impl.def.name, slot.method)}(${E.vtSlotParams(slot, true).join(", ")}) {`,
