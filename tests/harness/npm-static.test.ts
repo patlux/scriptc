@@ -18,7 +18,7 @@
  * lanes (npm.test.ts, vercel-e2e.test.ts pin those). */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { globSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, cpSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
@@ -152,6 +152,43 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     },
     120_000,
   );
+
+  test.for([undefined, "c"] as const)(
+    "import.meta.url stays module-specific in nested statically embedded ESM (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "import-meta-static-cli.ts");
+      const { coverage } = analyze(entry, { npmStatic: ["import-meta-static"] });
+      expect(coverage.npmStatic).toEqual([{ package: "import-meta-static", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.stats.statementsIsland).toBe(0);
+      const binary = await buildStatic(entry, ["import-meta-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test("statically embedded npm metadata survives binary relocation", async () => {
+    const entry = join(pilotRoot, "import-meta-static-cli.ts");
+    const binary = await buildStatic(entry, ["import-meta-static"], "c");
+    const relocatedRoot = mkdtempSync(join(cacheDir, "import-meta-relocated-"));
+    try {
+      const relocatedBinary = join(relocatedRoot, "program");
+      copyFileSync(binary, relocatedBinary);
+      cpSync(join(pilotRoot, "node_modules/import-meta-static/nested space"), join(relocatedRoot, "nested space"), {
+        recursive: true,
+      });
+      const result = await runBinary(relocatedBinary, []);
+      expect(result.stdout.toString("utf8")).toBe("true|true|true|true|true\n");
+      expect(result.exitCode).toBe(0);
+    } finally {
+      rmSync(relocatedRoot, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   test.for([undefined, "c"] as const)(
     "node:module with literal createRequire edges stays statically admitted (%s backend)",

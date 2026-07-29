@@ -5,10 +5,11 @@
  * ToBoolean/ToString coercion helpers, and field/element reads and writes
  * (FieldTarget). */
 import * as ts from "../ts7/adapter.js";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
-import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf } from "../program.js";
+import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf, npmPackageNameOf } from "../program.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, nodeThrowExpr, own } from "./lowerer.js";
@@ -29,6 +30,41 @@ import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./
 /** An assignable `obj.field` target — a class field, a record field, or a
  * class ACCESSOR property (reads become getter calls, writes setter calls;
  * fieldType is the property's one type). */
+/** Stable ESM identity for one statically embedded source file. Program
+ * modules preserve their exact source path (the same stance as
+ * __filename). Installed npm modules additionally carry a relocation
+ * anchor: their package-relative file suffix below the entry/output root.
+ * That keeps file identity useful to fileURLToPath, dirname, and string
+ * predicates without baking a transient staging root into the native
+ * product; native package sidecars are copied beside the executable.
+ * If no safe package-relative suffix can be derived, fail closed rather
+ * than manufacturing an identity. */
+function staticImportMetaPath(L: Lowerer, sf: ts.SourceFile): string | null {
+  const pkg = npmPackageNameOf(sf.fileName);
+  if (pkg === null) return sf.fileName;
+  const norm = sf.fileName.split("\\").join("/");
+  const marker = `/node_modules/${pkg}/`;
+  const index = norm.lastIndexOf(marker);
+  if (index === -1) return null;
+  const packageRelative = norm.slice(index + marker.length);
+  if (
+    packageRelative === "" ||
+    packageRelative.startsWith("../") ||
+    packageRelative.split("/").includes("..") ||
+    isAbsolute(packageRelative)
+  ) {
+    return null;
+  }
+  const entryDir = dirname(L.entry.fileName);
+  // Native package sidecars are copied beside the executable, so the
+  // stable embedded identity uses that layout directly: package files
+  // appear below the output root at their package-relative suffix.
+  const anchored = resolve(entryDir, packageRelative.split("/").join(sep));
+  const rel = relative(entryDir, anchored);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+  return anchored;
+}
+
 export type FieldTarget =
   | { container: "class"; obj: IrExpr; className: string; field: string; fieldType: IrType }
   | { container: "record"; obj: IrExpr; shapeId: string; field: string; fieldType: IrType }
@@ -152,6 +188,28 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     }
     if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
       return { kind: "strLit", value: expr.text, type: STRING, loc };
+    }
+    // `import.meta.url` — a statically-embedded ESM module still has a
+    // stable source identity even though no runtime module loader exists.
+    // Bake Node's canonical file-URL spelling for the ORIGINAL source file
+    // (percent escaping included). The value is identity metadata only:
+    // fileURLToPath/dirname/string predicates consume it normally, while
+    // createRequire keeps its existing compile-time erasure. Do not invent
+    // a general import.meta object — every other metadata member continues
+    // to fail closed at the MetaProperty fence below.
+    if (
+      ts.isPropertyAccessExpression(expr) &&
+      !expr.questionDotToken &&
+      expr.name.text === "url" &&
+      ts.isMetaProperty(expr.expression) &&
+      expr.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      isNodeEsmFile(expr.getSourceFile())
+    ) {
+      const file = staticImportMetaPath(L, expr.getSourceFile());
+      if (file === null) {
+        L.unsupported("SC1090", expr, "'import.meta.url' for a statically embedded module with no stable package-relative identity");
+      }
+      return { kind: "strLit", value: pathToFileURL(file).href, type: STRING, loc };
     }
     if (ts.isRegularExpressionLiteral(expr)) return L.lowerRegexLiteral(expr);
     if (ts.isTemplateExpression(expr)) return L.lowerTemplate(expr);
@@ -1834,9 +1892,9 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
 
     // Meta-properties, named: `new.target` reflects HOW a function was
     // invoked (compiled functions are never constructors of themselves —
-    // no runtime invocation record exists), and `import.meta`/
-    // `import.defer` are module-loader surface a native binary does not
-    // carry.
+    // no runtime invocation record exists), while bare `import.meta` and
+    // `import.defer` remain unsupported loader objects. The one admitted
+    // metadata projection, import.meta.url, folded above before this fence.
     if (ts.isMetaProperty(expr)) {
       const name =
         expr.keywordToken === ts.SyntaxKind.NewKeyword ? "new.target" : `import.${expr.name.text}`;

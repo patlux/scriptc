@@ -836,12 +836,14 @@ declare module "node:module" {
 declare module "module" {
   export * from "node:module";
 }
-/* import.meta: module-loader metadata with no value representation —
- * every read fences (SC1090) EXCEPT as createRequire's base, where it
- * only NAMES the containing file (import.meta.url, import.meta.filename,
- * and __filename all mean "this file" there). Declared so the pattern
- * typechecks under the fallback surface; @types/node's own augmentation
- * stands in when adopted. */
+/* import.meta.url: a statically embedded ESM module's original source
+ * identity, baked as Node's canonical escaped file URL. It is sufficient
+ * for fileURLToPath, dirname, string predicates, and createRequire's
+ * compile-time base handling without a runtime module loader. Other
+ * metadata reads fence (SC1090); import.meta.filename/dirname are accepted
+ * only as createRequire bases for compatibility with the existing static
+ * erasure. Declared so the patterns typecheck under the fallback surface;
+ * @types/node's own augmentation stands in when adopted. */
 interface ImportMeta {
   url: string;
   filename: string;

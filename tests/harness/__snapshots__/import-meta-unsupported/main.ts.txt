@@ -1,0 +1,23 @@
+import-meta-unsupported/main.ts:1:13 - error SC2020: 'ImportMeta.filename' is part of the standard library types but has no scriptc lowering yet
+
+  1 | console.log(import.meta.filename);
+    |             ^~~~~~~~~~~~~~~~~~~~
+  2 | console.log(import.meta.dirname);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+import-meta-unsupported/main.ts:2:13 - error SC2020: 'ImportMeta.dirname' is part of the standard library types but has no scriptc lowering yet
+
+  1 | console.log(import.meta.filename);
+  2 | console.log(import.meta.dirname);
+    |             ^~~~~~~~~~~~~~~~~~~
+  3 | console.log(import.meta);
+
+  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+
+import-meta-unsupported/main.ts:3:13 - error SC1090: 'import.meta' (module-loader metadata has no equivalent in a compiled binary) is not supported yet
+
+  2 | console.log(import.meta.dirname);
+  3 | console.log(import.meta);
+    |             ^~~~~~~~~~~
+  4 | 
