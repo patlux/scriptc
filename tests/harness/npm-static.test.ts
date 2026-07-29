@@ -105,6 +105,9 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // (yaml's browser-vs-node shape) and the opted-in resolution must
     // land on the SAME artifact, never the browser build.
     ["dualist", "dualist-cli.ts"],
+    // A generated provider catalog imported inside an opted-in package:
+    // JSON-derived records stay bounded and native across the package edge.
+    ["catalog-provider", "catalog-provider-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, [pkg]);

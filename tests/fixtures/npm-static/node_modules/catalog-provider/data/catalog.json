@@ -1,0 +1,312 @@
+{
+  "providers": {
+    "alpha": {
+      "display": "Alpha",
+      "enabled": true,
+      "limits": {
+        "input": 128000,
+        "output": 8192
+      },
+      "models": [
+        {
+          "id": "alpha/chat",
+          "aliases": [
+            "chat",
+            "fast"
+          ],
+          "pricing": {
+            "input": 1.25,
+            "output": 5
+          },
+          "featured": true
+        },
+        {
+          "id": "alpha/embed",
+          "aliases": [],
+          "pricing": null,
+          "featured": false
+        }
+      ]
+    },
+    "beta": {
+      "display": "Beta",
+      "enabled": false,
+      "limits": {
+        "input": 64000,
+        "output": 4096
+      },
+      "models": [
+        {
+          "id": "beta.text-v2",
+          "aliases": [
+            "text"
+          ],
+          "pricing": {
+            "input": 0.5,
+            "output": 1.5
+          },
+          "featured": false
+        }
+      ],
+      "metadata": {
+        "api-version/2025-01": "stable",
+        "cost:$": 7.75
+      }
+    }
+  },
+  "defaults": {
+    "primary": "alpha/chat",
+    "fallback": null
+  },
+  "empty": [],
+  "notes": [
+    "generated",
+    null,
+    true,
+    3.5
+  ],
+  "deep": {
+    "level0": {
+      "level1": {
+        "level2": {
+          "level3": {
+            "level4": {
+              "level5": {
+                "level6": {
+                  "level7": {
+                    "level8": {
+                      "level9": {
+                        "level10": {
+                          "level11": {
+                            "level12": {
+                              "level13": {
+                                "level14": {
+                                  "level15": {
+                                    "level16": {
+                                      "level17": {
+                                        "level18": {
+                                          "level19": {
+                                            "level20": {
+                                              "level21": {
+                                                "level22": {
+                                                  "level23": {
+                                                    "level24": {
+                                                      "level25": {
+                                                        "level26": {
+                                                          "level27": {
+                                                            "level28": {
+                                                              "level29": {
+                                                                "level30": {
+                                                                  "level31": {
+                                                                    "level32": {
+                                                                      "level33": {
+                                                                        "level34": {
+                                                                          "level35": {
+                                                                            "level36": {
+                                                                              "level37": {
+                                                                                "level38": {
+                                                                                  "level39": {
+                                                                                    "level40": {
+                                                                                      "level41": {
+                                                                                        "level42": {
+                                                                                          "level43": {
+                                                                                            "level44": {
+                                                                                              "level45": {
+                                                                                                "level46": {
+                                                                                                  "level47": {
+                                                                                                    "level48": {
+                                                                                                      "level49": {
+                                                                                                        "level50": {
+                                                                                                          "level51": {
+                                                                                                            "level52": {
+                                                                                                              "level53": {
+                                                                                                                "level54": {
+                                                                                                                  "level55": {
+                                                                                                                    "level56": {
+                                                                                                                      "level57": {
+                                                                                                                        "level58": {
+                                                                                                                          "level59": {
+                                                                                                                            "level60": {
+                                                                                                                              "level61": {
+                                                                                                                                "level62": {
+                                                                                                                                  "level63": {
+                                                                                                                                    "level64": {
+                                                                                                                                      "level65": {
+                                                                                                                                        "level66": {
+                                                                                                                                          "level67": {
+                                                                                                                                            "level68": {
+                                                                                                                                              "level69": {
+                                                                                                                                                "level70": {
+                                                                                                                                                  "level71": {
+                                                                                                                                                    "level72": {
+                                                                                                                                                      "level73": {
+                                                                                                                                                        "level74": {
+                                                                                                                                                          "level75": {
+                                                                                                                                                            "level76": {
+                                                                                                                                                              "level77": {
+                                                                                                                                                                "level78": {
+                                                                                                                                                                  "level79": {
+                                                                                                                                                                    "leaf": "bottom",
+                                                                                                                                                                    "value": 80
+                                                                                                                                                                  },
+                                                                                                                                                                  "sibling": 79
+                                                                                                                                                                },
+                                                                                                                                                                "sibling": 78
+                                                                                                                                                              },
+                                                                                                                                                              "sibling": 77
+                                                                                                                                                            },
+                                                                                                                                                            "sibling": 76
+                                                                                                                                                          },
+                                                                                                                                                          "sibling": 75
+                                                                                                                                                        },
+                                                                                                                                                        "sibling": 74
+                                                                                                                                                      },
+                                                                                                                                                      "sibling": 73
+                                                                                                                                                    },
+                                                                                                                                                    "sibling": 72
+                                                                                                                                                  },
+                                                                                                                                                  "sibling": 71
+                                                                                                                                                },
+                                                                                                                                                "sibling": 70
+                                                                                                                                              },
+                                                                                                                                              "sibling": 69
+                                                                                                                                            },
+                                                                                                                                            "sibling": 68
+                                                                                                                                          },
+                                                                                                                                          "sibling": 67
+                                                                                                                                        },
+                                                                                                                                        "sibling": 66
+                                                                                                                                      },
+                                                                                                                                      "sibling": 65
+                                                                                                                                    },
+                                                                                                                                    "sibling": 64
+                                                                                                                                  },
+                                                                                                                                  "sibling": 63
+                                                                                                                                },
+                                                                                                                                "sibling": 62
+                                                                                                                              },
+                                                                                                                              "sibling": 61
+                                                                                                                            },
+                                                                                                                            "sibling": 60
+                                                                                                                          },
+                                                                                                                          "sibling": 59
+                                                                                                                        },
+                                                                                                                        "sibling": 58
+                                                                                                                      },
+                                                                                                                      "sibling": 57
+                                                                                                                    },
+                                                                                                                    "sibling": 56
+                                                                                                                  },
+                                                                                                                  "sibling": 55
+                                                                                                                },
+                                                                                                                "sibling": 54
+                                                                                                              },
+                                                                                                              "sibling": 53
+                                                                                                            },
+                                                                                                            "sibling": 52
+                                                                                                          },
+                                                                                                          "sibling": 51
+                                                                                                        },
+                                                                                                        "sibling": 50
+                                                                                                      },
+                                                                                                      "sibling": 49
+                                                                                                    },
+                                                                                                    "sibling": 48
+                                                                                                  },
+                                                                                                  "sibling": 47
+                                                                                                },
+                                                                                                "sibling": 46
+                                                                                              },
+                                                                                              "sibling": 45
+                                                                                            },
+                                                                                            "sibling": 44
+                                                                                          },
+                                                                                          "sibling": 43
+                                                                                        },
+                                                                                        "sibling": 42
+                                                                                      },
+                                                                                      "sibling": 41
+                                                                                    },
+                                                                                    "sibling": 40
+                                                                                  },
+                                                                                  "sibling": 39
+                                                                                },
+                                                                                "sibling": 38
+                                                                              },
+                                                                              "sibling": 37
+                                                                            },
+                                                                            "sibling": 36
+                                                                          },
+                                                                          "sibling": 35
+                                                                        },
+                                                                        "sibling": 34
+                                                                      },
+                                                                      "sibling": 33
+                                                                    },
+                                                                    "sibling": 32
+                                                                  },
+                                                                  "sibling": 31
+                                                                },
+                                                                "sibling": 30
+                                                              },
+                                                              "sibling": 29
+                                                            },
+                                                            "sibling": 28
+                                                          },
+                                                          "sibling": 27
+                                                        },
+                                                        "sibling": 26
+                                                      },
+                                                      "sibling": 25
+                                                    },
+                                                    "sibling": 24
+                                                  },
+                                                  "sibling": 23
+                                                },
+                                                "sibling": 22
+                                              },
+                                              "sibling": 21
+                                            },
+                                            "sibling": 20
+                                          },
+                                          "sibling": 19
+                                        },
+                                        "sibling": 18
+                                      },
+                                      "sibling": 17
+                                    },
+                                    "sibling": 16
+                                  },
+                                  "sibling": 15
+                                },
+                                "sibling": 14
+                              },
+                              "sibling": 13
+                            },
+                            "sibling": 12
+                          },
+                          "sibling": 11
+                        },
+                        "sibling": 10
+                      },
+                      "sibling": 9
+                    },
+                    "sibling": 8
+                  },
+                  "sibling": 7
+                },
+                "sibling": 6
+              },
+              "sibling": 5
+            },
+            "sibling": 4
+          },
+          "sibling": 3
+        },
+        "sibling": 2
+      },
+      "sibling": 1
+    },
+    "sibling": 0
+  }
+}
