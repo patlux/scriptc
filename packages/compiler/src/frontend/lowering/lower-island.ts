@@ -276,25 +276,40 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
    * `Promise<jsval>` (jsBridgePromise, the fetch precedent) — so `await
    * import(x)` parks the fiber and resumes with the namespace HANDLE, and
    * a load/evaluation failure crosses as a catchable rejection, exactly
-   * where Node puts it. Specifiers must be string literals: the module
-   * graph is a BUILD-time artifact — a runtime-computed name has nothing
-   * to embed, and the fence says so. Static builds report the per-site
+   * where Node puts it.
+   *
+   * String-literal specifiers resolve at collection time (embedded key
+   * lookup). Computed / rewritten helpers (`import(rewrite(specifier))`)
+   * lower the runtime string through the same importDyn boundary: the
+   * engine resolves against the already-embedded graph and the builtin
+   * shim table, and an unresolvable key REJECTS the promise (lazy trap
+   * honesty — never invents a module). Static builds report the per-site
    * SC2012. Null for anything that isn't `import(...)`. */
   export function lowerDynamicImportCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
     if (call.expression.kind !== ts.SyntaxKind.ImportKeyword) return null;
     L.requireDynamicApi("'import()'", call);
     const loc = locOf(call);
     const arg = call.arguments[0];
-    if (arg === undefined || !ts.isStringLiteralLike(arg)) {
-      L.unsupported(
-        "SC1090",
-        call,
-        "dynamic import() of computed specifiers (the module graph embeds at " +
-          "build time — the specifier must be a string literal)",
-      );
+    if (arg === undefined) {
+      L.unsupported("SC1090", call, "dynamic import() without a specifier");
     }
     if (call.arguments.length !== 1) {
       L.unsupported("SC1090", call, "dynamic import() with import attributes");
+    }
+    // Computed / rewritten specifier: the module graph still embeds only
+    // what collection saw as literal sites; the runtime key rides
+    // island.importDyn. Builtins (`node:fs`) resolve without tables; an
+    // unembedded package rejects catchably (Node's dynamic-import shape).
+    if (!ts.isStringLiteralLike(arg)) {
+      const key = L.lowerExprExpecting(arg, STRING);
+      const raw: IrExpr = {
+        kind: "libCall",
+        fn: "island.importDyn",
+        args: [key],
+        type: JSVAL,
+        loc,
+      };
+      return { kind: "jsBridgePromise", value: raw, type: { kind: "promise", inner: JSVAL }, loc };
     }
     const res = L.dynImports.get(`${call.getSourceFile().fileName}\u0000${arg.text}`);
     if (!res) {

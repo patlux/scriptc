@@ -5466,8 +5466,21 @@ export function canAdaptDynFuncTo(
     // param synthesized by the adapter — no adapter models that; variadic
     // values live boxed and are called through their own thunks.
     t.rest !== true &&
-    t.params.every((p) => p.kind === "dyn" || canConvertToDyn(p, getRecord, getUnion)) &&
-    (t.ret.kind === "void" || t.ret.kind === "dyn" || canDynCheckTo(t.ret, getRecord, getUnion))
+    // jsval params mirror canBoxFuncIntoDyn: the adapter converts them
+    // INTO dyn through scr_dyn_from_jsval (engine values wrap by
+    // reference; data deep-copies). That is the OUT direction of the
+    // checker-`any` callback slot — `(any, any) => any` from a dyn OR
+    // default (`(this && this.rewrite) || function ...`).
+    t.params.every(
+      (p) => p.kind === "dyn" || p.kind === "jsval" || canConvertToDyn(p, getRecord, getUnion),
+    ) &&
+    // A jsval return converts the dyn result back through
+    // scr_jsval_from_dyn (dynCheck's jsval arm) — the package-callback
+    // return shape.
+    (t.ret.kind === "void" ||
+      t.ret.kind === "dyn" ||
+      t.ret.kind === "jsval" ||
+      canDynCheckTo(t.ret, getRecord, getUnion))
   );
 }
 

@@ -4430,6 +4430,38 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
       if (name === "split" && call.arguments.length !== 1) {
         L.unsupported("SC1120", call, "'.split()' with a limit argument");
       }
+      // Function replacements (the rewrite helper's
+      // `path.replace(/\.ts$/, (m, ...) => ...)` shape): the static
+      // regex intrinsic only models string templates. Under --dynamic the
+      // engine's own String.prototype.replace/replaceAll runs the
+      // callback with JS-exact this/args/return ToString — marshal into
+      // the island and exit the result as a string. Static builds keep
+      // the SC1120 fence.
+      if (name !== "split" && call.arguments.length === 2 && L.dynamic) {
+        const replNode = call.arguments[1]!;
+        const replTs = L.typeOf(replNode);
+        const callable =
+          L.checker.getCallSignatures(replTs).length > 0 ||
+          (replTs.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+        if (callable) {
+          L.requireDynamicApi(
+            `'.${name}()' with a function replacement`,
+            call,
+          );
+          const receiver = L.jsvalIn(lowerReceiver(), access.expression);
+          const pattern = L.jsvalIn(L.lowerExpr(arg0), arg0);
+          const replacer = L.jsvalIn(L.lowerExpr(replNode), replNode);
+          const result: IrExpr = {
+            kind: "jsOp",
+            op: "callMethod",
+            name,
+            args: [receiver, pattern, replacer],
+            type: JSVAL,
+            loc,
+          };
+          return { kind: "jsExit", value: result, type: STRING, loc };
+        }
+      }
       const receiver = lowerReceiver();
       const args = call.arguments.map((a) => L.lowerExpr(a));
       if (name !== "split" && args[1]?.type.kind !== "string") {

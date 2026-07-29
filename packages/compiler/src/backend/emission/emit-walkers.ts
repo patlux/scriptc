@@ -1747,6 +1747,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       d.push(`  return;`);
     } else if (t.ret.kind === "dyn") {
       d.push(`  return sc_r;`);
+    } else if (t.ret.kind === "jsval") {
+      // Checker-`any` return: the dyn result enters the island — wrapped
+      // cells unwrap by reference, data deep-copies, boxed functions cross
+      // through the host shim; a kind with no crossing throws the
+      // catchable TypeError (NULL + pending).
+      d.push(`  ScrJsval *out = scr_jsval_from_dyn(sc_r);`);
+      d.push(`  scr_dyn_release(sc_r);`);
+      d.push(`  return out;`);
     } else {
       // Validate the dyn result into the target's return type — a lying
       // wrapper throws the catchable TypeError here (path "$"), exactly

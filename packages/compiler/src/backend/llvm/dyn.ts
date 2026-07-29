@@ -2808,6 +2808,16 @@ export class LlDyn {
       B.terminate(`ret void`);
     } else if (t.ret.kind === "dyn") {
       B.terminate(`ret ptr ${r}`);
+    } else if (t.ret.kind === "jsval") {
+      // Checker-`any` return: the dyn result enters the island — wrapped
+      // cells unwrap by reference, data deep-copies, boxed functions cross
+      // through the host shim; a kind with no crossing throws the
+      // catchable TypeError (null + pending).
+      host.declare(`declare ptr @scr_jsval_from_dyn(ptr)`);
+      const out = B.tmp();
+      B.line(`${out} = call ptr @scr_jsval_from_dyn(ptr ${r})`);
+      B.line(`call void @scr_dyn_release(ptr ${r})`);
+      B.terminate(`ret ptr ${out}`);
     } else {
       // Validate the dyn result into the target's return type — a lying
       // wrapper throws the catchable TypeError here (path "$").
