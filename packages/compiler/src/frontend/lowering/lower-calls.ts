@@ -1500,6 +1500,12 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       } else {
         L.unsupported("SC1090", decl, "function declarations whose block body the frontend cannot locate");
       }
+      // Concise implicit-any arrows build their return statement directly
+      // above, outside lowerStmts. Run the same checked-boundary pass every
+      // ordinary statement and lifted lambda receives: nested island ops
+      // must marshal static receivers/arguments before validation. Block
+      // bodies are revisited idempotently.
+      enforceLibBoundary(L, body);
       const fn: IrFunction = {
         name: inst.name,
         params,
@@ -1974,7 +1980,9 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     argTypes: Map<ts.Symbol, ts.Type>,): GenericInstance {
     const key = shapes.map((s) => typeKey(s.type)).join(",");
     let inst = info.instances.get(key);
-    if (inst) return inst;
+    if (inst) {
+      return recursiveImplicitInstance(inst);
+    }
     if (info.instances.size >= MAX_GENERIC_INSTANCES) {
       L.unsupported(
         "SC1090",
@@ -2016,6 +2024,20 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     inst.implicitState = "done";
     return inst;
   }
+
+/** Same-key recursion observes the provisional DYN result before an
+ * implicit-any instance has settled its inferred return. Calls already
+ * emitted with that ABI cannot be rewritten after the fact, so pin the
+ * instance to DYN and let resolveInferredReturn coerce every eventual
+ * return through the checked boundary. Exported for the validator unit
+ * pin: this state transition is the source invariant behind the call
+ * validator's exact return-type check. */
+export function recursiveImplicitInstance(inst: GenericInstance): GenericInstance {
+  if (inst.implicitState === "lowering" && inst.implicitInferReturn) {
+    inst.returnPinned = true;
+  }
+  return inst;
+}
 
 /** The implicit-any twin of bindingGenericFnNodeOf, for LOCAL and module
    * bindings alike (`const knownBy = (cmd) => [cmd.name()].concat(...)`

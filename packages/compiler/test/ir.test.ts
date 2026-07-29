@@ -2,7 +2,8 @@ import { expect, test } from "vitest";
 import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
-import { BOOL, F64, STRING, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
+import { BOOL, DYN, F64, STRING, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
+import { recursiveImplicitInstance, type GenericInstance } from "../src/frontend/lowering/lower-calls.js";
 
 test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
@@ -61,6 +62,90 @@ test("validator rejects type mismatches and bad references", () => {
     expect.stringContaining('immutable local "x"'),
     expect.stringContaining('undeclared function "nope"'),
   ]);
+});
+
+test("recursive implicit-any instances pin the checked-dynamic call ABI", () => {
+  const inst: GenericInstance = {
+    name: "%recursive%0",
+    ordinal: 0,
+    params: [{ type: STRING, mode: "required" }],
+    returnType: DYN,
+    bindings: new Map(),
+    typeArgsText: "(string)",
+    implicitState: "lowering",
+    implicitInferReturn: true,
+  };
+  expect(recursiveImplicitInstance(inst)).toBe(inst);
+  expect(inst.returnPinned).toBe(true);
+
+  const settled: GenericInstance = { ...inst, returnPinned: undefined, implicitState: "done" };
+  recursiveImplicitInstance(settled);
+  expect(settled.returnPinned).toBeUndefined();
+});
+
+test("validator keeps direct-call return types fail-closed", () => {
+  const loc = { file: "recursive.js", start: 0, end: 0 };
+  const mod: IrModule = {
+    irVersion: 3,
+    sourceFile: "recursive.js",
+    entry: "%main",
+    functions: [
+      {
+        name: "%recursive%0",
+        params: [{ localId: "value.0", name: "value", type: STRING }],
+        returnType: DYN,
+        locals: [{ id: "value.0", name: "value", type: STRING, mutable: true }],
+        body: [{ kind: "return", value: { kind: "dynFrom", value: { kind: "strLit", value: "ok", type: STRING, loc }, type: DYN, loc }, loc }],
+        loc,
+      },
+      {
+        name: "%main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [],
+        body: [{ kind: "exprStmt", expr: { kind: "call", callee: "%recursive%0", args: [{ kind: "strLit", value: "x", type: STRING, loc }], type: STRING, loc }, loc }],
+        loc,
+      },
+    ],
+  };
+  expect(validateModule(mod).map((e) => e.message)).toContain(
+    "in %main: call %recursive%0 type string != return dyn",
+  );
+});
+
+test("validator keeps island method arguments fail-closed", () => {
+  const loc = { file: "method.js", start: 0, end: 0 };
+  const mod: IrModule = {
+    irVersion: 3,
+    sourceFile: "method.js",
+    entry: "%main",
+    functions: [
+      {
+        name: "%main",
+        params: [],
+        returnType: { kind: "void" },
+        locals: [],
+        body: [
+          {
+            kind: "exprStmt",
+            expr: {
+              kind: "jsOp",
+              op: "callMethod",
+              name: "trim",
+              args: [{ kind: "strLit", value: " x ", type: STRING, loc }],
+              type: { kind: "jsval" },
+              loc,
+            },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+  };
+  expect(validateModule(mod).map((e) => e.message)).toContain(
+    "in %main: jsOp callMethod arg must be jsval, got string",
+  );
 });
 
 test("serializer round-trips ±Infinity and refuses NaN", () => {
