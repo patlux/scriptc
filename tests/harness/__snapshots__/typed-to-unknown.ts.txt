@@ -1,0 +1,35 @@
+typed-to-unknown.ts:10:13 - error SC1101: converting typed values to 'unknown' is not supported yet
+
+   9 | // Arbitrary class identity/state is not a checked-dynamic data copy.
+  10 | takeUnknown(new ArbitraryClass());
+     |             ^~~~~~~~~~~~~~~~~~~~
+  11 | 
+
+  hint: numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet
+
+typed-to-unknown.ts:15:13 - error SC1101: passing 'Promise<number>' values into typed 'unknown' slots (promises are live async objects, not checked-dynamic data, and cannot be validated back to Promise<T>) are not supported yet
+
+  14 | // an implicit typed boundary.
+  15 | takeUnknown(Promise.resolve(1));
+     |             ^~~~~~~~~~~~~~~~~~
+  16 | 
+
+  hint: numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet
+
+typed-to-unknown.ts:21:13 - error SC1101: passing '(Map<string, number>) => number' function values into 'unknown' slots (a parameter or result type has no dynamic representation — only JSON-safe data, Uint8Array, undefined-armed unions of those, 'unknown', and functions over the same set cross) are not supported yet
+
+  20 | }
+  21 | takeUnknown(takesMap);
+     |             ^~~~~~~~
+  22 | 
+
+  hint: numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet
+
+typed-to-unknown.ts:25:13 - error SC1101: converting typed values to 'unknown' is not supported yet
+
+  24 | // validated extraction yet; do not silently collapse it to an object husk.
+  25 | takeUnknown(new URL("https://example.com/path"));
+     |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  26 | 
+
+  hint: numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet

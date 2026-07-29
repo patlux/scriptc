@@ -52,3 +52,26 @@ console.log(fromOptional("present") as string, fromOptional(undefined) === undef
 const parsed: unknown = JSON.parse('{"k":1}');
 const injected: unknown = { k: 1 };
 console.log((parsed as { k: number }).k === (injected as { k: number }).k);
+
+// Transparent typed assertions at the slot still build the literal in the
+// checked-dynamic world. That preserves the own-key distinction a typed
+// record slot cannot carry: omitted and explicitly-present undefined are
+// different objects even though JSON drops both values.
+type OptionalRow = { tag?: string; n: number };
+const absentRow: unknown = ({ n: 1 } as OptionalRow);
+const presentRow: unknown = ({ tag: undefined, n: 1 } as OptionalRow);
+console.log(
+  Object.hasOwn(absentRow as object, "tag"),
+  Object.hasOwn(presentRow as object, "tag"),
+  JSON.stringify(absentRow),
+  JSON.stringify(presentRow),
+);
+
+// A typed generic reset to [] can flow out as unknown without inheriting an
+// `any[]`/never[] element representation. No element crosses; the result is
+// the checked-dynamic empty array.
+function resetAndHold<T>(values: T[]): unknown {
+  values = [];
+  return values;
+}
+console.log(JSON.stringify(resetAndHold([1, 2, 3])));

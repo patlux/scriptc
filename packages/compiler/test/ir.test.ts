@@ -3,7 +3,7 @@ import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
 import { recursiveImplicitInstance, type GenericInstance } from "../src/frontend/lowering/lower-calls.js";
-import { BOOL, DYN, F64, JSVAL, STRING, VOID, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
+import { BOOL, DYN, F64, JSVAL, STRING, VOID, moduleUsesDynAsync, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
 
 test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
@@ -158,6 +158,34 @@ test("recursive implicit-any instances pin the checked-dynamic call ABI", () => 
   const settled: GenericInstance = { ...inst, returnPinned: undefined, implicitState: "done" };
   recursiveImplicitInstance(settled);
   expect(settled.returnPinned).toBeUndefined();
+});
+
+test("typed-promise dynFrom pulls the checked-dynamic async runtime", () => {
+  const loc = { file: "promise.js", start: 0, end: 0 };
+  const mod = structuredClone(fibModule);
+  mod.functions[1]!.body = [{
+    kind: "exprStmt",
+    expr: {
+      kind: "dynFrom",
+      value: {
+        kind: "varRef",
+        localId: "p.0",
+        type: { kind: "promise", inner: F64 },
+        loc,
+      },
+      type: DYN,
+      loc,
+    },
+    loc,
+  }];
+  mod.functions[1]!.locals = [{
+    id: "p.0",
+    name: "p",
+    type: { kind: "promise", inner: F64 },
+    mutable: false,
+  }];
+
+  expect(moduleUsesDynAsync(mod)).toBe(true);
 });
 
 test("validator keeps direct-call return types fail-closed", () => {

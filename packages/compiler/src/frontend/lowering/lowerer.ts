@@ -2783,6 +2783,13 @@ export class Lowerer {
           `passing '${this.fmt(actual)}' function values into 'unknown' slots (a parameter or result type has no dynamic representation — only JSON-safe data, Uint8Array, undefined-armed unions of those, 'unknown', and functions over the same set cross)`,
         );
       }
+      if (actual.kind === "promise") {
+        this.unsupported(
+          "SC1101",
+          node,
+          `passing '${this.fmt(actual)}' values into typed 'unknown' slots (promises are live async objects, not checked-dynamic data, and cannot be validated back to Promise<T>)`,
+        );
+      }
       this.unsupported("SC1101", node);
     }
     // jsval mismatches surviving coerceToExpected involve a type with no
@@ -2986,7 +2993,16 @@ export class Lowerer {
       return { kind: "promiseVoidWiden", value: expr, type: expected, loc: expr.loc };
     }
     if (expected.kind === "dyn" && expr.type.kind !== "dyn") {
-      if (expr.kind === "unitLit" || this.dynConvertible(expr.type)) {
+      // Typed promises deliberately do NOT enter ordinary `unknown` slots.
+      // The checked-dynamic runtime has an internal promise box for the JS
+      // lane's untyped promise machinery, but that representation is not a
+      // checked data conversion: it preserves a live async object by
+      // reference and cannot be validated back to Promise<T>. Keep TypeScript
+      // flows fail-closed; JavaScript's established dynamic-promise lane is
+      // unchanged.
+      const source = this.program.getSourceFile(expr.loc.file);
+      const typedPromise = expr.type.kind === "promise" && source !== undefined && !isJsSourceFile(source);
+      if (!typedPromise && (expr.kind === "unitLit" || this.dynConvertible(expr.type))) {
         return { kind: "dynFrom", value: expr, type: DYN, loc: expr.loc };
       }
       // An error-HIERARCHY object (builtin subclass or user `extends
@@ -5610,14 +5626,36 @@ export class Lowerer {
         return this.coerceInto(node, this.lowerArrayLiteral(x, expected), expected);
       }
     }
-    // An OBJECT LITERAL against a checked-dynamic slot (an emitted-JS or
-    // typed default-options ABI): the value's world IS the checked-dynamic
-    // tree — build the dyn literal directly. This also preserves own-key
-    // presence for explicitly written undefined properties.
+    // A LITERAL against a checked-dynamic slot (an emitted-JS or typed
+    // default-options ABI): the value's world IS the checked-dynamic tree.
+    // Build object literals directly so own-key presence survives even
+    // through transparent typed assertions (`{ a: undefined } as Opt`),
+    // instead of first collapsing absent and present-undefined into the
+    // monomorphic record slot. An explicitly `any`-typed assertion keeps
+    // its island representation and is not unwrapped here. Empty array
+    // literals are likewise safe to construct directly; this is the
+    // generic reset idiom (`pending = []`) where the contextual element
+    // type may be `any` even though no engine value actually crosses.
     if (expected?.kind === "dyn") {
       let x: ts.Expression = node;
-      while (ts.isParenthesizedExpression(x)) x = x.expression;
+      for (;;) {
+        if (ts.isParenthesizedExpression(x)) {
+          x = x.expression;
+          continue;
+        }
+        if (ts.isAsExpression(x) || ts.isAssertionExpression(x) || ts.isSatisfiesExpression(x)) {
+          const asserted = this.mapTypeOf(this.typeOf(x));
+          if (asserted?.kind !== "jsval") {
+            x = x.expression;
+            continue;
+          }
+        }
+        break;
+      }
       if (ts.isObjectLiteralExpression(x)) return lowerDynObjectLiteral(this, x);
+      if (ts.isArrayLiteralExpression(x) && x.elements.length === 0) {
+        return { kind: "dynArrLit", elems: [], type: DYN, loc: locOf(x) };
+      }
     }
     // An ARRAY LITERAL against a UNION slot whose own type has no static
     // home (the JS dyn fallback — the checker gave no usable context):

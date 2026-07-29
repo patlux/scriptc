@@ -5870,7 +5870,12 @@ export function moduleUsesDynAsync(mod: IrModule): boolean {
       for (const item of v) visit(item);
       return;
     }
-    const node = v as { kind?: unknown; fn?: unknown; type?: { kind?: unknown } };
+    const node = v as {
+      kind?: unknown;
+      fn?: unknown;
+      type?: { kind?: unknown };
+      value?: { type?: { kind?: unknown } };
+    };
     if (node.kind === "libCall" && typeof node.fn === "string" && fns.has(node.fn)) {
       found = true;
       return;
@@ -5879,6 +5884,14 @@ export function moduleUsesDynAsync(mod: IrModule): boolean {
     // await lives in the gated TU) — promise<dyn> receivers' awaits and
     // the lifted then/catch helpers alike.
     if (node.kind === "awaitExpr" && node.type !== undefined && node.type.kind === "dyn") {
+      found = true;
+      return;
+    }
+    // A dynFrom whose operand is a typed promise boxes it through
+    // scr_dyn_new_promise[_adapting], both implemented in scr_async_dyn.c.
+    // This arises only in the established JavaScript dynamic-promise lane;
+    // typed TypeScript promise→unknown coercions stay frontend-fenced.
+    if (node.kind === "dynFrom" && node.value !== undefined && node.value.type?.kind === "promise") {
       found = true;
       return;
     }

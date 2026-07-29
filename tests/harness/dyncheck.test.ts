@@ -598,6 +598,34 @@ console.log(base.a, boxed.a);
     expect(r.stdout).toBe("1 2\n");
   });
 
+  test("typed→unknown is a deep copy — dyn writes never alias the original", async () => {
+    // Same dynFrom stance for the typed-to-unknown lane as any-slots:
+    // Node would alias; scriptc deep-copies into the checked-dynamic tree.
+    // Differential corpus cannot pin this (Node is the oracle there).
+    // Validated extraction is its own deep copy (dynCheck); this pins only
+    // the entry conversion — mutation on the dyn side leaves the typed
+    // original intact, and mutation on the original leaves the dyn intact.
+    const r = await compileAndRun(
+      "unknown-record-copy",
+      `type Payload = { id: string; n: number };
+function hold<T>(value: T): unknown { return value; }
+const original: Payload = { id: "root", n: 1 };
+const boxed = hold(original);
+original.id = "source";
+original.n = 2;
+(boxed as Payload).id = "boxed";
+(boxed as Payload).n = 3;
+console.log(original.id, original.n, (boxed as Payload).id, (boxed as Payload).n);
+`,
+    );
+    expect(r.exitCode).toBe(0);
+    // original stayed source/2 — dyn-side writes never aliased back.
+    // boxed still holds the entry-time deep copy (root/1); each
+    // `(boxed as Payload)` is a fresh validated extraction, so discarded
+    // field writes on those extracts never accumulate either.
+    expect(r.stdout).toBe("source 2 root 1\n");
+  });
+
   test("an uninitialized `any` binding is the dyn undefined, not a trap", async () => {
     // The undefined-init rule: dyn slots are never NULL. (Node-agreeing
     // reads are corpus-tested — 2040; this pins the non-trap guarantee on
