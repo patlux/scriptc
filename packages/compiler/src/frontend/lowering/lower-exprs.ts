@@ -1880,6 +1880,29 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             expr,
           );
         }
+        // Empty fixed record (`const theme = {}`, residual empty-record
+        // field reads after contextual/default-object shape work): the
+        // shape carries no fields and no overflow, so every name is an
+        // own-property miss — Node answers undefined. Provenance is the
+        // EMPTY layout itself: do not invent keys. Pure receivers fold;
+        // impure ones need a bind first (the same purity gate as
+        // statically-decided `in` on empty shapes).
+        if (
+          recvShape &&
+          !recvShape.tuple &&
+          recvShape.indexValue === undefined &&
+          recvShape.fields.length === 0 &&
+          !shapeHasAccessorSlots(recvShape)
+        ) {
+          if (pureReemittable(recvLowered)) {
+            return { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc };
+          }
+          L.unsupported(
+            "SC1090",
+            expr,
+            `reading '${expr.name.text}' from a computed empty-record expression (the field is always absent — bind the value to a variable first)`,
+          );
+        }
       }
       // An ABSTRACT property through an abstract-typed receiver: the
       // declaration is erased at runtime — Node defines no field for it,

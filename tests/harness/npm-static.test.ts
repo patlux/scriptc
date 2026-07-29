@@ -202,6 +202,24 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   );
 
   test.for([undefined, "c"] as const)(
+    "theme-config npm package preserves fg/current empty-record reads (%s backend)",
+    async (backend) => {
+      // Coverage residual: theme.fg / theme.current and startup options
+      // against defaulted empty bags; own-key presence and Object.keys
+      // must match Node (no phantom keys).
+      const entry = join(pilotRoot, "theme-config-cli.ts");
+      const binary = await buildStatic(entry, ["theme-config-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test.for([undefined, "c"] as const)(
     "extends an npm class whose runtime declaration joined the static graph (%s backend)",
     async (backend) => {
       const entry = join(pilotRoot, "event-stream-extends-cli.ts");

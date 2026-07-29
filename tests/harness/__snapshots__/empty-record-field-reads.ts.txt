@@ -1,0 +1,13 @@
+empty-record-field-reads.ts:13:12 - error SC1090: reading 'fg' from a computed empty-record expression (the field is always absent — bind the value to a variable first) is not supported yet
+
+  12 | // Impure empty-record receiver: always-absent, but evaluation has effects.
+  13 | const _a = side().fg;
+     |            ^~~~~~~~~
+  14 | 
+
+empty-record-field-reads.ts:17:12 - error SC1090: reading 'fg' from a value of type '{ bg: string; }' is not supported yet
+
+  16 | const theme = { bg: "paper" };
+  17 | const _b = theme.fg;
+     |            ^~~~~~~~
+  18 | 
