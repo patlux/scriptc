@@ -1,0 +1,21 @@
+// Generated-catalog regression: a JSON import stays one native checked-
+// dynamic graph instead of materializing the checker's huge/deep record type.
+import catalog from "./data/catalog.json" with { type: "json" };
+import { isSharedCatalog } from "./shared.ts";
+
+const providers = Object.values(catalog.providers);
+const displays = providers.map((provider) => provider.display);
+const enabled = providers.filter((provider) => provider.enabled).map((provider) => provider.display);
+const aliases = catalog.providers.beta.models.flatMap((model) => model.aliases);
+
+console.log(displays.join(","));
+console.log(enabled.join("|"));
+console.log(aliases.join("|"));
+console.log(Object.keys(catalog.providers).join(","));
+console.log(Object.keys(catalog.providers.beta.metadata).join(","));
+console.log(catalog.providers.beta.metadata["api-version/2025-01"], catalog.providers.beta.metadata["cost:$"]);
+console.log(catalog.defaults.primary, catalog.defaults.fallback === null);
+console.log(catalog.providers.alpha.models[1]!.pricing === null, catalog.providers.beta.metadata !== undefined);
+console.log(JSON.stringify(catalog.notes), JSON.stringify(catalog.empty));
+console.log(isSharedCatalog(catalog));
+console.log(catalog.deep.level0.level1.level2.level3.level4.level5.level6.level7.level8.level9.level10.level11.level12.level13.level14.level15.level16.level17.level18.level19.level20.level21.level22.level23.level24.level25.level26.level27.level28.level29.level30.level31.level32.level33.level34.level35.level36.level37.level38.level39.level40.level41.level42.level43.level44.level45.level46.level47.level48.level49.level50.level51.level52.level53.level54.level55.level56.level57.level58.level59.level60.level61.level62.level63.level64.level65.level66.level67.level68.level69.level70.level71.level72.level73.level74.level75.level76.level77.level78.level79.leaf);

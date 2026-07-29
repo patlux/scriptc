@@ -481,18 +481,23 @@ export interface FileParts {
     visit(sf);
   }
 
-/** JSON module default imports (`import pkg from "../package.json"`):
-   * the document is DATA known at build time, so the binding bakes into a
-   * record global — the checker's structural type for the module (thanks
-   * to resolveJsonModule) maps to a record shape, the JSON text parses in
-   * the compiler, and comptimeValueToIr turns the value into literal IR
-   * assigned in the importing module's %init prelude (evaluation order:
-   * imports before the importer's body, like npm bindings). Two importers
-   * of the same document share one global (keyed by the ALIASED symbol).
-   * Shapes outside the bakeable surface (null-valued fields, mixed
-   * arrays, ...) report the standard unsupported-type diagnostic at the
-   * import site. Preflight already fenced named/namespace JSON imports
-   * and kept .json files out of the module order. */
+/** JSON module default imports (`import catalog from "./data/catalog.json"
+   * with { type: "json" }`): the document is immutable BUILD INPUT but its
+   * JavaScript value is an ordinary mutable object graph. Keep that graph in
+   * the checked-dynamic representation and construct it with the runtime's
+   * strict JSON parser from one embedded string. This avoids materializing
+   * the checker's potentially enormous/deep structural record type (and one
+   * record/union IR node per JSON shape) while preserving JSON.parse's own
+   * numbers, strings, booleans, nulls, arrays, object keys/order, and missing
+   * properties — no QuickJS/island dependency.
+   *
+   * The compiler still parses once to reject documents tsgo accepted but
+   * strict JSON rejects (comments, trailing commas) at the import statement.
+   * The runtime parse happens once per JSON module: two importers share the
+   * same global object identity, keyed by the aliased default symbol. JSON
+   * files remain leaves outside module order; the first importing module's
+   * prelude initializes the shared global before its body runs. Preflight
+   * already fenced named/namespace JSON imports. */
   export function collectJsonImports(L: Lowerer, parts: FileParts[]): void {
     for (const fp of parts) {
       for (const stmt of fp.sf.statements) {
@@ -505,18 +510,12 @@ export interface FileParts {
         const jsonSf = L.checker.declarationsOf(target)[0]?.getSourceFile();
         if (!jsonSf || !jsonSf.fileName.endsWith(".json")) continue;
         try {
-          const tsType = L.typeOf(clause.name);
-          const mapped = L.mapTypeOf(tsType);
-          if (!mapped || !L.comptimeBakeable(mapped)) {
-            L.badType(clause.name, tsType);
-          }
           // tsgo tolerates JSON shapes strict JSON.parse rejects (a leading
           // `//` comment — importAttributes11), so no SC0001 guarantees a
           // clean document: a failing parse gates at the import statement
           // (Node refuses to import the module at runtime too).
-          let parsed: unknown;
           try {
-            parsed = JSON.parse(jsonSf.text);
+            JSON.parse(jsonSf.text);
           } catch (e) {
             L.pushDiag(invalidJsonModuleDiag(
               jsonSf.fileName,
@@ -525,21 +524,30 @@ export interface FileParts {
             ));
             throw new PoisonError();
           }
-          const value = L.comptimeValueToIr(parsed, mapped, "$", clause.name);
-          let g = L.globalsBySymbol.get(target);
-          if (!g) {
-            g = {
-              id: `%g.json.${L.globalsList.length}`,
-              name: clause.name.text,
-              type: mapped,
-              mutable: false,
-            };
-            L.globalsBySymbol.set(target, g);
-            L.globalsList.push(g);
-          }
+          // The first importer owns initialization. Later importers resolve
+          // through the same alias-keyed global and must not replace the
+          // object (ES JSON modules cache one mutable default value).
+          if (L.globalsBySymbol.has(target)) continue;
+          const g: IrGlobal = {
+            id: `%g.json.${L.globalsList.length}`,
+            name: clause.name.text,
+            type: DYN,
+            mutable: false,
+          };
+          L.globalsBySymbol.set(target, g);
+          L.jsonDynSymbols.add(target);
+          L.globalsList.push(g);
+          const loc = locOf(stmt);
+          const value: IrExpr = {
+            kind: "libCall",
+            fn: "json.parse",
+            args: [{ kind: "strLit", value: jsonSf.text, type: STRING, loc }],
+            type: DYN,
+            loc,
+          };
           const actions = L.jsonInitActions.get(fp.sf) ?? [];
           L.jsonInitActions.set(fp.sf, actions);
-          actions.push({ kind: "assign", localId: g.id, value, loc: locOf(stmt) });
+          actions.push({ kind: "assign", localId: g.id, value, loc });
         } catch (e) {
           if (!(e instanceof PoisonError)) throw e;
           // diagnostic already recorded; uses of the binding poison too

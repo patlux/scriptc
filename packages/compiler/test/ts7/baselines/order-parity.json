@@ -5312,6 +5312,13 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2650-json-catalog/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/2650-json-catalog/shared.ts",
+    "<repo>/tests/corpus/2650-json-catalog/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
@@ -6934,12 +6941,6 @@
      "hint": "use named exports: export function f() {} / import { f } from \"./m\""
     }
    ]
-  },
-  "<repo>/tests/diagnostics/json-shape/main.ts": {
-   "order": [
-    "<repo>/tests/diagnostics/json-shape/main.ts"
-   ],
-   "diags": []
   },
   "<repo>/tests/diagnostics/maps-surface.ts": {
    "order": [

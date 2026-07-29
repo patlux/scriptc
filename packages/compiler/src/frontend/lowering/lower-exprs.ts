@@ -1296,6 +1296,26 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       if (!expr.questionDotToken && chainTailClaimed(L, expr)) {
         return L.lowerOptionalChain(expr);
       }
+      // A JSON-module import is stored as one checked-dynamic graph. Route
+      // every property step by the LOWERED receiver before asking mapType
+      // for the checker's potentially huge/deep structural record type:
+      // this is the generated-catalog fast path, and it composes for every
+      // depth (`catalog.providers.x.models.y`). The keyed read preserves
+      // own-property order, punctuation-bearing names, missing fields, and
+      // null/array/scalar values exactly as parsed.
+      if (L.isJsonDynExpr(expr.expression)) {
+        const receiver = L.lowerExpr(expr.expression);
+        if (receiver.type.kind === "dyn") {
+          const read: IrExpr = {
+            kind: "dynKeyGet",
+            key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+            value: receiver,
+            type: DYN,
+            loc,
+          };
+          return dynReadAtCheckerType(L, read, expr);
+        }
+      }
       // Island receiver: o.x is an engine property read (getProp may throw
       // — reading off null/undefined — bridged catchably like everything
       // at the boundary). `o?.x` arrives here too, through the chain
@@ -2437,6 +2457,24 @@ export function pureReemittable(e: IrExpr): boolean {
     if (e.kind === "jsOp" && (e.op === "truthy" || e.op === "not")) return e.args.every(pureReemittable);
     return pureReemittable(e);
   }
+
+/** A property/element read from the checked-dynamic tree, eagerly
+ * validated only when the checker says THIS occurrence is a primitive.
+ * JSON-import structural composites stay dyn (so generated catalogs never
+ * recursively materialize their record/array type); scalar leaves extract
+ * to native values for arithmetic, string methods, logging, and callbacks.
+ * Null and mixed/composite results stay dyn — their equality, typeof,
+ * enumeration, array HOF, and JSON surfaces dispatch by runtime kind. */
+function dynReadAtCheckerType(L: Lowerer, read: IrExpr, node: ts.Expression): IrExpr {
+  const widened = L.checker.getBaseTypeOfLiteralType(L.typeOf(node));
+  const flags = widened.flags;
+  const target =
+    flags & ts.TypeFlags.Number ? F64
+    : flags & ts.TypeFlags.String ? STRING
+    : flags & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral) ? BOOL
+    : null;
+  return target === null ? read : { kind: "dynCheck", value: read, type: target, loc: read.loc };
+}
 
 /** `a ?? b` — JS-exact nullish coalescing: ONLY null/undefined take the
    * default (0, "", and false do not), and the right side evaluates lazily.
@@ -5635,6 +5673,35 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         expr,
         "symbol-keyed property access outside class fields keyed by a module-level `const k = Symbol('desc')` (static shapes have no symbol-keyed storage)",
       );
+    }
+    // A JSON-module graph (and any other checker-typed value whose runtime
+    // representation is already dyn) takes the keyed path before type
+    // mapping. This keeps bracket access over generated catalogs bounded:
+    // mapping the imported structural record merely to learn that the
+    // receiver value is dyn would recursively walk the whole document.
+    if (L.isJsonDynExpr(expr.expression)) {
+      const obj = L.lowerExpr(expr.expression);
+      if (obj.type.kind === "dyn") {
+        const rawKey = L.lowerExpr(expr.argumentExpression);
+        const key: IrExpr | null =
+          rawKey.type.kind === "string"
+            ? rawKey
+            : rawKey.type.kind === "f64" || rawKey.type.kind === "bool" || rawKey.type.kind === "dyn"
+              ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
+              : null;
+        if (key) {
+          const opt = chainGuardedByQuestionDot(expr.expression);
+          const read: IrExpr = {
+            kind: "dynKeyGet",
+            key,
+            ...(opt ? { optional: true as const } : {}),
+            value: obj,
+            type: DYN,
+            loc: locOf(expr),
+          };
+          return dynReadAtCheckerType(L, read, expr);
+        }
+      }
     }
     // A never-tainted JS receiver type (neverTaintedJsType — `cmd[1]` on
     // `const cmd = ['pwd', []]`, whose binding lowered checked-dynamic)

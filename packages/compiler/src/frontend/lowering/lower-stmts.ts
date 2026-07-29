@@ -2992,7 +2992,14 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // is inference residue, not element information — unmappable, so the
     // dyn initializer keeps the binding checked-dynamic.
     const bindingTainted = neverTaintedJsType(L, decl.name, L.typeOf(decl.name));
+    const jsonDynInit = L.isJsonDynExpr(decl.initializer);
+    if (jsonDynInit) L.markJsonDynBinding(decl.name);
     let type =
+      // Runtime representation wins only for a JSON-derived dyn subtree or
+      // HOF result. Its checker type can be an enormous structural catalog,
+      // but the value deliberately remains one checked-dynamic graph;
+      // unrelated dyn initializers keep the established typed-local rules.
+      (jsonDynInit && init.type.kind === "dyn" ? DYN : null) ??
       (L.dynamic &&
       (init.type.kind === "jsval" ||
         (init.type.kind === "promise" && init.type.inner.kind === "jsval"))
@@ -3013,8 +3020,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
       // handles dyn (validated exits, routed engine ops for wrapped
       // island members).
       (L.dynamic && init.type.kind === "dyn" && jsvalFlavoredType(L.mapTypeOf(L.typeOf(decl.name)) ?? DYN) ? DYN : null) ??
-      (bindingTainted ? null : L.mapTypeOf(L.typeOf(decl.name))) ??
-      (init.type.kind === "dyn" ? DYN : null);
+      (bindingTainted ? null : L.mapTypeOf(L.typeOf(decl.name)));
     // A JS `let x = {}`: TS's empty-object-literal type admits ANY later
     // non-nullish assignment (`envs = {}`, later `envs =
     // Object.fromEntries(...)` — tsc accepts every such write, since

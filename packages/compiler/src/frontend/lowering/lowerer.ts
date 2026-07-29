@@ -984,11 +984,16 @@ export class Lowerer {
    * `import "polyfill"` before an `import "./app.js"` runs the package
    * top-level BEFORE app's init, not after. */
   readonly npmInitActions = new Map<ts.SourceFile, Map<ts.Statement, IrStmt[]>>();
-  /** Per-file %init PRELUDE statements for JSON imports: bakeable DATA
-   * assignments with no observable evaluation order of their own —
-   * prepended by lowerFileInit so the bindings are live before any
-   * top-level statement runs. */
+  /** Per-file %init PRELUDE statements for JSON imports: one strict
+   * runtime parse into a checked-dynamic graph, prepended by lowerFileInit
+   * so the binding is live before the importing module's body runs. */
   readonly jsonInitActions = new Map<ts.SourceFile, IrStmt[]>();
+  /** Symbols whose runtime value is a JSON-import-derived checked-dynamic
+   * graph (the imported root, locals retaining a subtree/HOF result, and
+   * temporarily-bound dyn HOF callback parameters). This provenance lets
+   * lowering bypass the checker's enormous structural JSON types without
+   * changing unrelated checked-dynamic flows. */
+  readonly jsonDynSymbols = new Set<ts.Symbol>();
   /** The embedded npm runtime graph (collectNpmImports), attached to the
    * emitted module. Null without npm imports or without --dynamic. */
   npmEmbedded: IrModule["embedded"] | null = null;
@@ -1562,6 +1567,48 @@ export class Lowerer {
       if (byDecl) return byDecl;
     }
     return null;
+  }
+
+  /** Whether an expression is rooted in a native JSON-module graph. Keep
+   * this deliberately structural and narrow: subtree reads, method chains
+   * over those subtrees, and Object.keys/values/entries preserve the dyn
+   * representation; arbitrary calls receiving JSON do not necessarily
+   * return JSON-derived values and are not inferred here. */
+  isJsonDynExpr(node: ts.Expression): boolean {
+    let expr = node;
+    while (
+      ts.isParenthesizedExpression(expr) || ts.isNonNullExpression(expr) ||
+      ts.isAsExpression(expr) || ts.isAssertionExpression(expr) ||
+      ts.isSatisfiesExpression(expr)
+    ) {
+      expr = expr.expression;
+    }
+    if (ts.isIdentifier(expr)) {
+      const symbol = this.resolveValueSymbol(expr);
+      return symbol !== null && this.jsonDynSymbols.has(symbol);
+    }
+    if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+      return this.isJsonDynExpr(expr.expression);
+    }
+    if (!ts.isCallExpression(expr)) return false;
+    if (ts.isPropertyAccessExpression(expr.expression)) {
+      if (this.isJsonDynExpr(expr.expression.expression)) return true;
+      const member = expr.expression.name.text;
+      if (
+        (member === "keys" || member === "values" || member === "entries") &&
+        this.isStdlibGlobal(expr.expression.expression, "Object") &&
+        expr.arguments.length === 1 && !ts.isSpreadElement(expr.arguments[0]!)
+      ) {
+        return this.isJsonDynExpr(expr.arguments[0]!);
+      }
+    }
+    return false;
+  }
+
+  markJsonDynBinding(name: ts.BindingName): void {
+    if (!ts.isIdentifier(name)) return;
+    const symbol = this.checker.getSymbolAtLocation(name);
+    if (symbol) this.jsonDynSymbols.add(symbol);
   }
 
   splitFiles(): FileParts[] {

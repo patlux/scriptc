@@ -371,18 +371,19 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
    * its declared arity. */
   function hofCallbackArg(L: Lowerer, argNode: ts.Expression, lead: IrType[], arrT: IrType):
     { fnArg: IrExpr & { type: IrType & { kind: "func" } }; arity: number } {
-    // A DYN-receiver HOF's callback (`parsed.flatMap((value) => ...)`):
-    // the contextual signature types the unannotated param `any` (the
-    // receiver is checker-`any[]`), while the VALUE each call receives is
-    // the dyn element `unknown` code sees — narrow the param declaration
-    // to `unknown` so it lowers as the dyn it carries (typeof tests and
-    // validated extractions ride as usual) instead of fencing on `any`.
+    // A DYN-receiver HOF's callback (`parsed.flatMap((value) => ...)`, or
+    // Object.values(jsonModuleRecord).flatMap(...)): the VALUE each call
+    // receives is a dyn element, even when the checker context retained a
+    // large structural JSON member type for the unannotated parameter.
+    // Override such parameters to `unknown` for lowering so their accesses
+    // route through the checked-dynamic tree instead of recursively mapping
+    // the whole imported catalog shape. Explicit annotations remain honest
+    // boundaries and keep their ordinary validation/fences.
     const overridden: ts.Node[] = [];
     if (lead[0]?.kind === "dyn" && (ts.isArrowFunction(argNode) || ts.isFunctionExpression(argNode))) {
       for (const p of argNode.parameters) {
         if (!ts.isIdentifier(p.name) || p.type || p.initializer || p.dotDotDotToken) continue;
-        const t = L.checker.getTypeAtLocation(p.name);
-        if ((t.flags & ts.TypeFlags.Any) !== 0 && !L.chainNarrowedType.has(p.name)) {
+        if (!L.chainNarrowedType.has(p.name)) {
           L.chainNarrowedType.set(p.name, L.checker.getUnknownType());
           overridden.push(p.name);
         }

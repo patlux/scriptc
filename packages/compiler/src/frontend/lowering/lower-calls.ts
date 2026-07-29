@@ -2883,6 +2883,35 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       return L.lowerOptionalChain(expr);
     }
 
+    // A checker-typed receiver whose VALUE is already the checked-dynamic
+    // tree (notably a JSON-import catalog) dispatches by runtime kind before
+    // any typed stdlib/member path sees the checker's enormous structural
+    // type. The receiver's runtime kind decides map/flatMap/join/etc.;
+    // callbacks bind dyn elements and use checked narrowing at their leaves.
+    if (
+      ts.isPropertyAccessExpression(expr.expression) &&
+      !expr.expression.questionDotToken &&
+      !expr.questionDotToken &&
+      !expr.arguments.some((a) => ts.isSpreadElement(a)) &&
+      L.isJsonDynExpr(expr.expression.expression)
+    ) {
+      const receiver = L.lowerExpr(expr.expression.expression);
+      if (receiver.type.kind === "dyn") {
+        const served = lowerDynReceiverMethodCall(L, expr, expr.expression);
+        if (served) return served;
+        const args = expr.arguments.map((a) => L.lowerExprExpecting(a, DYN));
+        return {
+          kind: "dynInvoke",
+          recv: receiver,
+          method: expr.expression.name.text,
+          calleeName: expr.expression.getText(),
+          args,
+          type: DYN,
+          loc,
+        };
+      }
+    }
+
     // super(...) is handled by the derived-constructor lowering as a
     // top-level statement (its field-initializer ordering lives there);
     // any other position would misorder initialization — rejected.
