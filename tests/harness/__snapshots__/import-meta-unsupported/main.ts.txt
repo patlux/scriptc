@@ -20,4 +20,4 @@ import-meta-unsupported/main.ts:3:13 - error SC1090: 'import.meta' (module-loade
   2 | console.log(import.meta.dirname);
   3 | console.log(import.meta);
     |             ^~~~~~~~~~~
-  4 | 
+  4 |
