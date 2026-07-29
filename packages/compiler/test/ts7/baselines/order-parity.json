@@ -5306,6 +5306,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2646-arguments-declared-params.js": {
+   "order": [
+    "<repo>/tests/corpus/2646-arguments-declared-params.js"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/300-if-else.ts": {
    "order": [
     "<repo>/tests/corpus/300-if-else.ts"
