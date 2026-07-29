@@ -1,0 +1,15 @@
+optional-computed-call.ts:8:7 - error SC1090: 'symbol'-typed keys in optional computed calls (string, number, boolean, and unknown keys stringify) are not supported yet
+
+  7 | const symbolKey = Symbol("run");
+  8 | table[symbolKey]?.(1);
+    |       ^~~~~~~~~
+  9 | 
+
+optional-computed-call.ts:12:16 - error SC1101: converting typed values to 'unknown' is not supported yet
+
+  11 | const instance = new Instance();
+  12 | table["run"]?.(instance);
+     |                ^~~~~~~~
+  13 | 
+
+  hint: numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy — the 'unknown' value never aliases the original), and functions over those (boxed, identity preserved) convert into 'unknown' slots; this value's type has no dynamic representation yet

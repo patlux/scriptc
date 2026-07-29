@@ -2829,6 +2829,78 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
       dotNode = tail;
       recvNode = tail.expression;
     }
+    // `obj[key]?.(...args)` guards the MEMBER value, not `obj`. The
+    // checked-dynamic lane keeps the reference semantics explicitly:
+    // receiver once, key once, GET before the nullish test, lazy args, and
+    // a taken call with `this = receiver`. This claim intentionally sits
+    // before lowering recvNode itself — lowering the element access would
+    // extract an unbound function and lose the receiver.
+    if (
+      dotNode === expr &&
+      ts.isCallExpression(expr) &&
+      ts.isElementAccessExpression(recvNode) &&
+      !recvNode.questionDotToken
+    ) {
+      let recv = L.lowerExpr(recvNode.expression);
+      // A checker-typed receiver whose runtime key may select heterogeneous
+      // fields has no one static read type, but every field can still ride
+      // the checked-dynamic tree. Convert the receiver once at this call
+      // boundary rather than asking lowerElementAccess to guess a field
+      // representation. This is the TypeBox arity-table shape.
+      if (
+        recv.type.kind !== "dyn" &&
+        recv.type.kind !== "jsval" &&
+        L.dynConvertible(recv.type)
+      ) {
+        recv = { kind: "dynFrom", value: recv, type: DYN, loc: recv.loc };
+      }
+      if (recv.type.kind === "dyn") {
+        const rawKey = L.lowerExpr(recvNode.argumentExpression);
+        const key: IrExpr | null =
+          rawKey.type.kind === "string"
+            ? rawKey
+            : rawKey.type.kind === "f64" || rawKey.type.kind === "bool" || rawKey.type.kind === "dyn"
+              ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
+              : null;
+        if (!key) {
+          L.unsupported(
+            "SC1090",
+            recvNode.argumentExpression,
+            `'${L.fmt(rawKey.type)}'-typed keys in optional computed calls (string, number, boolean, and unknown keys stringify)`,
+          );
+        }
+        const args: IrExpr[] = [];
+        const spreads: { arg: number; what: string }[] = [];
+        for (const a of expr.arguments) {
+          if (ts.isSpreadElement(a)) {
+            spreads.push({ arg: args.length, what: a.expression.getText() });
+            args.push(L.lowerExprExpecting(a.expression, DYN));
+          } else {
+            args.push(L.lowerExprExpecting(a, DYN));
+          }
+        }
+        return {
+          kind: "dynOptKeyCall",
+          recv,
+          key,
+          calleeName: recvNode.getText(),
+          args,
+          ...(spreads.length > 0 ? { spreads } : {}),
+          type: DYN,
+          loc,
+        };
+      }
+      if (recv.type.kind === "jsval") {
+        const key = L.jsvalIn(L.lowerExpr(recvNode.argumentExpression), recvNode.argumentExpression);
+        const args = expr.arguments.map((a) => {
+          if (ts.isSpreadElement(a)) {
+            L.unsupported("SC1090", a, "spread arguments in optional calls of computed 'any' member values");
+          }
+          return L.jsvalIn(L.lowerExpr(a), a);
+        });
+        return { kind: "jsOptKeyCall", recv, key, args, type: JSVAL, loc };
+      }
+    }
     const receiver = L.lowerExpr(recvNode);
     if (receiver.type.kind === "dyn") {
       // `pkg?.name` / `pkg?.scripts?.[k]` on a JSON.parse result: dyn

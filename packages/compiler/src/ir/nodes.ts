@@ -4472,6 +4472,23 @@ export type IrExpr =
    * ArgumentListEvaluation). The emitters build one fresh argument array
    * and apply through it. */
   | { kind: "dynCall"; callee: IrExpr; calleeName: string; args: IrExpr[]; spreads?: { arg: number; what: string }[]; type: IrType; loc: SrcLoc }
+  /** Optional computed member call on the checked-dynamic tree —
+   * `recv[key]?.(...args)`. `recv` and `key` evaluate exactly once, in that
+   * order; the member GET happens before the nullish test and may throw
+   * (routed island getters included). Undefined/null members answer the
+   * undefined dyn singleton without evaluating any arguments. Every other
+   * member evaluates arguments left-to-right, then calls with `this = recv`;
+   * non-callables and callee/argument throws propagate catchably. The
+   * static checked-dynamic lane deliberately owns this shape; island-held
+   * receivers route only at the keyed-get/call boundary when one is already
+   * wrapped in dyn storage. Receiver, key, and args are borrowed; result is
+   * owned (+1). MAY THROW. */
+  | { kind: "dynOptKeyCall"; recv: IrExpr; key: IrExpr; calleeName: string; args: IrExpr[]; spreads?: { arg: number; what: string }[]; type: IrType; loc: SrcLoc }
+  /** Optional computed member call on an island receiver. The backend keeps
+   * the engine object and member reference together: receiver/key once,
+   * getter before the nullish test, lazy arguments, and JS_Call with the
+   * original receiver as this_val. Result is an owned jsval. MAY THROW. */
+  | { kind: "jsOptKeyCall"; recv: IrExpr; key: IrExpr; args: IrExpr[]; type: IrType; loc: SrcLoc }
   /** Prototype-method DISPATCH on a dyn receiver — `recv.m(...)` where `m`
    * is a name a dyn-representable prototype declares (Array/String/
    * Function shared names: push, slice, join, forEach, map, apply, ...),

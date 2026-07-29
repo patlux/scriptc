@@ -2,7 +2,7 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, JSVAL, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, RUNTIME_ERROR_CLASSES, STRING, typeEquals } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -1780,6 +1780,94 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           e.type,
           `scr_dyn_call(${callee.name}, ${argsExpr}, ${args.length}, ${what})`,
         );
+      }
+      case "dynOptKeyCall": {
+        // Optional computed-member call: receiver/key first and once, then
+        // the member GET. Arguments stay inside the taken branch, so a
+        // nullish member cannot observe their side effects. The runtime
+        // helper binds the original receiver around the call.
+        const recv = E.emitExpr(e.recv);
+        const key = E.emitExpr(e.key);
+        const member = E.fallibleTemp(DYN, `${dynKeyGetHelper(E)}(${recv.name}, ${key.name}, false)`);
+        const isNullish = `(${member.name}->kind == SCR_DYN_UNDEF || ${member.name}->kind == SCR_DYN_NULL)`;
+        const name = `sc_t${E.tempCounter++}`;
+        E.line(`${cDecl(e.type, name)};`);
+        E.line(`if (${isNullish}) {`);
+        E.indent++;
+        E.line(`${name} = scr_dyn_retain(scr_dyn_undefined());`);
+        E.indent--;
+        E.line(`} else {`);
+        E.indent++;
+        E.frames.push([]);
+        const what = cStringLiteral(Buffer.from(e.calleeName, "utf8"));
+        let call: string;
+        if (e.spreads !== undefined && e.spreads.length > 0) {
+          const spreadAt = new Map(e.spreads.map((s) => [s.arg, s.what]));
+          const pack = E.newTemp(DYN, "scr_dyn_new_arr()");
+          e.args.forEach((a, i) => {
+            const v = E.emitExpr(a);
+            const spreadWhat = spreadAt.get(i);
+            if (spreadWhat !== undefined) {
+              const w = cStringLiteral(Buffer.from(spreadWhat, "utf8"));
+              E.line(`scr_dyn_arr_push_spread(${pack.name}, ${v.name}, ${w});`);
+              E.emitPendingCheck();
+            } else {
+              E.moveTemp(v);
+              E.line(`scr_dyn_arr_push(${pack.name}, ${v.name});`);
+            }
+          });
+          call = `scr_dyn_apply_with_this(${member.name}, ${recv.name}, ${pack.name}, ${what})`;
+        } else {
+          const args = e.args.map((a) => E.emitExpr(a));
+          let argsExpr = "NULL";
+          if (args.length > 0) {
+            const arr = `sc_t${E.tempCounter++}`;
+            E.line(`ScrDyn *${arr}[${args.length}] = { ${args.map((a) => a.name).join(", ")} };`);
+            argsExpr = arr;
+          }
+          call = `scr_dyn_call_with_this(${member.name}, ${recv.name}, ${argsExpr}, ${args.length}, ${what})`;
+        }
+        const called = E.fallibleTemp(e.type, call);
+        E.moveTemp(called);
+        E.line(`${name} = ${called.name};`);
+        E.releaseFrame(E.frames.pop()!);
+        E.indent--;
+        E.line(`}`);
+        E.currentFrame().push({ name, type: e.type });
+        return { name, type: e.type };
+      }
+      case "jsOptKeyCall": {
+        const recv = E.emitExpr(e.recv);
+        const key = E.emitExpr(e.key);
+        // Arguments must stay lazy, so the runtime takes callback emitters
+        // only after its getter/nullish prelude. Model that with the same
+        // branch split here: one getter result, nullish short-circuit, then
+        // args and a receiver-bound engine call.
+        const member = E.fallibleTemp(JSVAL, `scr_jsval_get_idx(${recv.name}, ${key.name})`);
+        const name = `sc_t${E.tempCounter++}`;
+        E.line(`${cDecl(e.type, name)};`);
+        E.line(`if (scr_jsval_is_nullish(${member.name})) {`);
+        E.indent++;
+        E.line(`${name} = scr_jsval_undefined();`);
+        E.indent--;
+        E.line(`} else {`);
+        E.indent++;
+        E.frames.push([]);
+        const args = e.args.map((a) => E.emitExpr(a));
+        let pack = "NULL";
+        if (args.length > 0) {
+          const arr = `sc_t${E.tempCounter++}`;
+          E.line(`ScrJsval *${arr}[] = { ${args.map((a) => a.name).join(", ")} };`);
+          pack = arr;
+        }
+        const called = E.fallibleTemp(e.type, `scr_jsval_call_with_this(${member.name}, ${recv.name}, ${args.length}, ${pack})`);
+        E.moveTemp(called);
+        E.line(`${name} = ${called.name};`);
+        E.releaseFrame(E.frames.pop()!);
+        E.indent--;
+        E.line(`}`);
+        E.currentFrame().push({ name, type: e.type });
+        return { name, type: e.type };
       }
       case "dynInvoke": {
         // Prototype-method dispatch on a dyn receiver: everything is

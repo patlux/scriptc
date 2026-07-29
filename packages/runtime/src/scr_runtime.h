@@ -2984,6 +2984,13 @@ ScrDyn *scr_dyn_new_func(ScrClosure *clo, ScrDynThunk thunk, uint32_t arity, con
  * boxed thunk (per-arg checks live there). `args` entries are BORROWED;
  * the result is owned (+1), or NULL with the exception pending. */
 ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const char *what);
+/* Call one already-resolved member with its original receiver bound as JS
+ * `this` (`recv[key]?.(...)`'s taken path). The callee/receiver/args are
+ * borrowed; result +1 or NULL pending. Native boxed closures observe the
+ * ambient dyn receiver; an island callee receives the real engine object
+ * as JS_Call's this_val. */
+ScrDyn *scr_dyn_call_with_this(const ScrDyn *d, const ScrDyn *recv, ScrDyn *const *args, size_t argc, const char *what);
+ScrDyn *scr_dyn_apply_with_this(const ScrDyn *d, const ScrDyn *recv, const ScrDyn *args, const char *what);
 /* scr_dyn_call over a dyn ARRAY's elements (the spread-application form —
  * `f(...args)` after the emitted argument array is built): argv IS the
  * array's items. Borrows both; result owned (+1), or NULL pending. */
@@ -3111,6 +3118,7 @@ typedef struct ScrDynJsvalOps {
   ScrDyn *(*key_get)(ScrJsval *cell, const ScrStr *k); /* o[k]; +1 or NULL pending */
   bool (*key_set)(ScrJsval *cell, const ScrStr *k, const ScrDyn *v); /* false = pending */
   ScrDyn *(*call)(ScrJsval *cell, ScrDyn *const *args, size_t argc); /* f(...); +1 or NULL pending */
+  ScrDyn *(*call_with_this)(ScrJsval *cell, ScrJsval *recv, ScrDyn *const *args, size_t argc); /* f.call(recv,...); +1 or NULL pending */
   /* o.m(...) — the ENGINE's own prototypes run (JS-exact flatMap/map/
    * forEach/...). A missing or non-callable member throws Node's
    * "<what> is not a function" (the call site's spelling — V8's text,
@@ -4088,6 +4096,7 @@ ScrJsval *scr_jsval_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJs
  * anything else calls with this = o (non-callables throw in the engine). */
 ScrJsval *scr_jsval_opt_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv);
 ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv);
+ScrJsval *scr_jsval_call_with_this(ScrJsval *f, ScrJsval *recv, int argc, ScrJsval **argv);
 /* Spread application on an island callee — `f(...pre, ...spread)` through
  * the prelude helper's REAL spread syntax (iterator protocols are the
  * engine's own; the guards front-run V8's exact spread-call TypeError

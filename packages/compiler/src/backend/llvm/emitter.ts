@@ -73,7 +73,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, JSVAL, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesProcessEvents, moduleUsesStream, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -6138,6 +6138,143 @@ class LlEmitter {
         const out = this.own({ name: t, type: e.type });
         this.emitPendingCheck();
         return out;
+      }
+      case "dynOptKeyCall": {
+        // Optional computed-member call: evaluate receiver/key and GET
+        // before branching; emit arguments only in the non-nullish member
+        // block. scr_dyn_call_with_this binds the original receiver.
+        const recv = this.emitExpr(e.recv);
+        const key = this.emitExpr(e.key);
+        const get = this.dyn.dynKeyGetHelper();
+        const memberName = B.tmp();
+        B.line(`${memberName} = call ptr @${get}(ptr ${recv.name}, ptr ${key.name}, i1 false)`);
+        const member = this.own({ name: memberName, type: DYN });
+        this.emitPendingCheck();
+        const kd = this.dynKind(member.name);
+        const isU = B.tmp();
+        const isN = B.tmp();
+        const isNullish = B.tmp();
+        B.line(`${isU} = icmp eq i32 ${kd}, ${DK.UNDEF}`);
+        B.line(`${isN} = icmp eq i32 ${kd}, ${DK.NULL}`);
+        B.line(`${isNullish} = or i1 ${isU}, ${isN}`);
+        const slot = B.slot();
+        B.entryAllocas.push(`${slot} = alloca ptr`);
+        const lu = B.newLabel("dock.u");
+        const lc = B.newLabel("dock.c");
+        const lj = B.newLabel("dock.j");
+        B.condBr(isNullish, lu, lc);
+        B.startBlock(lu);
+        this.declare(`declare ptr @scr_dyn_undefined()`);
+        this.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
+        const u = B.tmp();
+        const ur = B.tmp();
+        B.line(`${u} = call ptr @scr_dyn_undefined()`);
+        B.line(`${ur} = call ptr @scr_dyn_retain_v(ptr ${u})`);
+        B.line(`store ptr ${ur}, ptr ${slot}`);
+        B.br(lj);
+        B.startBlock(lc);
+        this.frames.push([]);
+        let call: string;
+        if (e.spreads !== undefined && e.spreads.length > 0) {
+          this.declare(`declare ptr @scr_dyn_new_arr()`);
+          this.declare(`declare void @scr_dyn_arr_push(ptr, ptr)`);
+          this.declare(`declare void @scr_dyn_arr_push_spread(ptr, ptr, ptr)`);
+          this.declare(`declare ptr @scr_dyn_apply_with_this(ptr, ptr, ptr, ptr)`);
+          const spreadAt = new Map(e.spreads.map((s) => [s.arg, s.what]));
+          const pack = B.tmp();
+          B.line(`${pack} = call ptr @scr_dyn_new_arr()`);
+          this.own({ name: pack, type: DYN });
+          e.args.forEach((a, i) => {
+            const v = this.emitExpr(a);
+            const spreadWhat = spreadAt.get(i);
+            if (spreadWhat !== undefined) {
+              B.line(`call void @scr_dyn_arr_push_spread(ptr ${pack}, ptr ${v.name}, ptr ${this.cstr(spreadWhat)})`);
+              this.emitPendingCheck();
+            } else {
+              this.moveTemp(v);
+              B.line(`call void @scr_dyn_arr_push(ptr ${pack}, ptr ${v.name})`);
+            }
+          });
+          call = `call ptr @scr_dyn_apply_with_this(ptr ${member.name}, ptr ${recv.name}, ptr ${pack}, ptr ${this.cstr(e.calleeName)})`;
+        } else {
+          const args = e.args.map((a) => this.emitExpr(a));
+          let argsPtr = "null";
+          if (args.length > 0) {
+            const arr = B.slot();
+            B.entryAllocas.push(`${arr} = alloca [${args.length} x ptr]`);
+            args.forEach((a, i) => {
+              const p = B.tmp();
+              B.line(`${p} = getelementptr inbounds [${args.length} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+              B.line(`store ptr ${a.name}, ptr ${p}`);
+            });
+            argsPtr = arr;
+          }
+          this.declare(`declare ptr @scr_dyn_call_with_this(ptr, ptr, ptr, i64, ptr)`);
+          call = `call ptr @scr_dyn_call_with_this(ptr ${member.name}, ptr ${recv.name}, ptr ${argsPtr}, i64 ${args.length}, ptr ${this.cstr(e.calleeName)})`;
+        }
+        const called = B.tmp();
+        B.line(`${called} = ${call}`);
+        const callOut = this.own({ name: called, type: e.type });
+        this.emitPendingCheck();
+        this.moveTemp(callOut);
+        B.line(`store ptr ${called}, ptr ${slot}`);
+        this.releaseFrame(this.frames.pop()!);
+        B.br(lj);
+        B.startBlock(lj);
+        const t = B.tmp();
+        B.line(`${t} = load ptr, ptr ${slot}`);
+        return this.own({ name: t, type: e.type });
+      }
+      case "jsOptKeyCall": {
+        const recv = this.emitExpr(e.recv);
+        const key = this.emitExpr(e.key);
+        this.declare(`declare ptr @scr_jsval_get_idx(ptr, ptr)`);
+        const memberName = B.tmp();
+        B.line(`${memberName} = call ptr @scr_jsval_get_idx(ptr ${recv.name}, ptr ${key.name})`);
+        const member = this.own({ name: memberName, type: JSVAL });
+        this.emitPendingCheck();
+        this.declare(`declare zeroext i1 @scr_jsval_is_nullish(ptr)`);
+        const isN = B.tmp();
+        B.line(`${isN} = call zeroext i1 @scr_jsval_is_nullish(ptr ${member.name})`);
+        const slot = B.slot();
+        B.entryAllocas.push(`${slot} = alloca ptr`);
+        const lu = B.newLabel("jock.u");
+        const lc = B.newLabel("jock.c");
+        const lj = B.newLabel("jock.j");
+        B.condBr(isN, lu, lc);
+        B.startBlock(lu);
+        this.declare(`declare ptr @scr_jsval_undefined()`);
+        const u = B.tmp();
+        B.line(`${u} = call ptr @scr_jsval_undefined()`);
+        B.line(`store ptr ${u}, ptr ${slot}`);
+        B.br(lj);
+        B.startBlock(lc);
+        this.frames.push([]);
+        const args = e.args.map((a) => this.emitExpr(a));
+        let argsPtr = "null";
+        if (args.length > 0) {
+          const arr = B.slot();
+          B.entryAllocas.push(`${arr} = alloca [${args.length} x ptr]`);
+          args.forEach((a, i) => {
+            const p = B.tmp();
+            B.line(`${p} = getelementptr inbounds [${args.length} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+            B.line(`store ptr ${a.name}, ptr ${p}`);
+          });
+          argsPtr = arr;
+        }
+        this.declare(`declare ptr @scr_jsval_call_with_this(ptr, ptr, i32, ptr)`);
+        const called = B.tmp();
+        B.line(`${called} = call ptr @scr_jsval_call_with_this(ptr ${member.name}, ptr ${recv.name}, i32 ${args.length}, ptr ${argsPtr})`);
+        const callOut = this.own({ name: called, type: e.type });
+        this.emitPendingCheck();
+        this.moveTemp(callOut);
+        B.line(`store ptr ${called}, ptr ${slot}`);
+        this.releaseFrame(this.frames.pop()!);
+        B.br(lj);
+        B.startBlock(lj);
+        const t = B.tmp();
+        B.line(`${t} = load ptr, ptr ${slot}`);
+        return this.own({ name: t, type: e.type });
       }
       case "dynInvoke": {
         // Prototype-method dispatch on a dyn receiver: everything is

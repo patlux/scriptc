@@ -3070,6 +3070,41 @@ function validateFunction(
         }
         break;
       }
+      case "dynOptKeyCall": {
+        checkExpr(e.recv);
+        expectType(e.recv, DYN, "dynOptKeyCall receiver");
+        checkExpr(e.key);
+        if (e.key.type.kind !== "string") err(`dynOptKeyCall key is ${e.key.type.kind}, not string`, e.loc);
+        if (e.type.kind !== "dyn") err(`dynOptKeyCall must be dyn-typed, got ${e.type.kind}`, e.loc);
+        for (const a of e.args) {
+          checkExpr(a);
+          if (a.type.kind !== "dyn") err(`dynOptKeyCall argument of kind ${a.type.kind} (must be dyn)`, e.loc);
+        }
+        if (e.spreads !== undefined) {
+          if (e.spreads.length === 0) err("dynOptKeyCall spreads must be non-empty when present", e.loc);
+          let prev = -1;
+          for (const s of e.spreads) {
+            if (!Number.isInteger(s.arg) || s.arg < 0 || s.arg >= e.args.length) {
+              err(`dynOptKeyCall spread index ${s.arg} out of range`, e.loc);
+            }
+            if (s.arg <= prev) err("dynOptKeyCall spread indices must be strictly increasing", e.loc);
+            prev = s.arg;
+          }
+        }
+        break;
+      }
+      case "jsOptKeyCall": {
+        checkExpr(e.recv);
+        expectType(e.recv, JSVAL, "jsOptKeyCall receiver");
+        checkExpr(e.key);
+        expectType(e.key, JSVAL, "jsOptKeyCall key");
+        if (e.type.kind !== "jsval") err(`jsOptKeyCall must be jsval-typed, got ${e.type.kind}`, e.loc);
+        for (const a of e.args) {
+          checkExpr(a);
+          if (a.type.kind !== "jsval") err(`jsOptKeyCall argument of kind ${a.type.kind} (must be jsval)`, e.loc);
+        }
+        break;
+      }
       case "dynInvoke": {
         checkExpr(e.recv);
         expectType(e.recv, DYN, "dynInvoke receiver");

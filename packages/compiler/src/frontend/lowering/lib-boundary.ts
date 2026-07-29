@@ -224,12 +224,12 @@ export function enforceLibBoundary(L: Lowerer, node: unknown): void {
     });
     return;
   }
-  if (kind === "dynCall" || kind === "dynInvoke") {
+  if (kind === "dynCall" || kind === "dynOptKeyCall" || kind === "dynInvoke") {
     // Checked-dynamic call arguments must be dyn. Convertible typed values
     // take the ordinary dynFrom crossing; island values have NO bridge
     // into the checked-dynamic tree (a jsval handle cannot ride the deep-copy), so they
     // fence — named, catchable at runtime in JS sources, never an ICE.
-    const e = rec as unknown as Extract<IrExpr, { kind: "dynCall" | "dynInvoke" }>;
+    const e = rec as unknown as Extract<IrExpr, { kind: "dynCall" | "dynOptKeyCall" | "dynInvoke" }>;
     if (kind === "dynInvoke") {
       const inv = e as Extract<IrExpr, { kind: "dynInvoke" }>;
       if (inv.recv.type.kind !== "dyn") {

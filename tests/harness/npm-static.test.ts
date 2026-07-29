@@ -161,6 +161,26 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   );
 
   test.for([undefined, "c"] as const)(
+    "TypeBox-style arity table optional computed call stays static (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "typebox-match-cli.ts");
+      const { coverage } = analyze(entry, { npmStatic: ["typebox-match-static"] });
+      expect(coverage.npmStatic).toEqual([{ package: "typebox-match-static", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.stats.statementsFailed).toBe(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      const binary = await buildStatic(entry, ["typebox-match-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test.for([undefined, "c"] as const)(
     "default-object npm package preserves retryCount presence (%s backend)",
     async (backend) => {
       // Exact directory-lock startup shape: emitted JS has `options = {}`

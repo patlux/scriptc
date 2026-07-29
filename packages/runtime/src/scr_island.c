@@ -1362,6 +1362,30 @@ static ScrDyn *isl_dynjs_call(ScrJsval *cell, ScrDyn *const *args, size_t argc) 
   return d;
 }
 
+static ScrDyn *isl_dynjs_call_with_this(ScrJsval *cell, ScrJsval *recv, ScrDyn *const *args, size_t argc) {
+  ScrJsval *stack_cells[8];
+  ScrJsval **cells = argc <= 8 ? stack_cells : malloc(argc * sizeof *cells);
+  if (!isl_dynjs_args_in(args, argc, cells)) {
+    if (cells != stack_cells) free(cells);
+    return NULL;
+  }
+  isl_entry(ISL_ENTRY_VALUE);
+  JSValue stack_args[8];
+  JSValue *argv = argc <= 8 ? stack_args : malloc(argc * sizeof(JSValue));
+  for (size_t i = 0; i < argc; i++) argv[i] = cells[i]->v;
+  JSValue r = JS_Call(isl_ctx, cell->v, recv->v, (int)argc, argv);
+  if (argv != stack_args) free(argv);
+  for (size_t i = 0; i < argc; i++) scr_jsval_release(cells[i]);
+  if (cells != stack_cells) free(cells);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  ScrDyn *d = isl_dyn_from_value(r);
+  JS_FreeValue(isl_ctx, r);
+  return d;
+}
+
 static ScrDyn *isl_dynjs_invoke(ScrJsval *cell, const char *method, ScrDyn *const *args, size_t argc, const char *what) {
   isl_entry(ISL_ENTRY_VALUE);
   JSValue fn = JS_GetPropertyStr(isl_ctx, cell->v, method); /* owned */
@@ -1530,6 +1554,7 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_key_get,
   isl_dynjs_key_set,
   isl_dynjs_call,
+  isl_dynjs_call_with_this,
   isl_dynjs_invoke,
   isl_dynjs_is_nullish,
   isl_dynjs_obj_walk,
@@ -1797,6 +1822,20 @@ ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv) {
   return isl_cell_new(r);
 }
 
+ScrJsval *scr_jsval_call_with_this(ScrJsval *f, ScrJsval *recv, int argc, ScrJsval **argv) {
+  isl_entry(ISL_ENTRY_VALUE);
+  JSValue stack_args[8];
+  JSValue *args = argc <= 8 ? stack_args : malloc((size_t)argc * sizeof(JSValue));
+  for (int i = 0; i < argc; i++) args[i] = argv[i]->v;
+  JSValue r = JS_Call(isl_ctx, f->v, recv->v, argc, args);
+  if (args != stack_args) free(args);
+  if (JS_IsException(r)) {
+    isl_bridge_exception();
+    return NULL;
+  }
+  return isl_cell_new(r);
+}
+
 /* Spread application on an island callee (jsOp callSpread) — the prelude
  * helper's real `f(...pre, ...spread)`, so iterator protocols are the
  * engine's own and the guards front-run V8's exact spread-call TypeError
@@ -2043,10 +2082,10 @@ ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
  * opaque box owns ONE reference on the whole ScrDyn FUNC node (closure
  * and descriptor ride inside); the engine finalizer releases it — at
  * teardown that runs before the RC audit, the isl_hostfn story. A
- * scriptc exception thrown inside reverse-bridges to an engine throw;
- * the receiver (`this`) is deliberately not forwarded (the typed
- * host-function stance — dyn thunks read the ambient receiver, which no
- * engine call site binds). Each crossing mints a FRESH engine function:
+ * scriptc exception thrown inside reverse-bridges to an engine throw.
+ * The engine receiver crosses into the checked-dynamic ambient-this
+ * window for the synchronous thunk call, preserving member-call `this`;
+ * plain calls pass engine undefined. Each crossing mints a FRESH engine function:
  * re-crossing identity is not preserved (SEMANTICS.md). */
 
 static JSClassID isl_dynfn_class_id = 0;
@@ -2064,7 +2103,6 @@ static const JSClassDef isl_dynfn_class = {
 
 static JSValue isl_dynfn_invoke(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv, int magic, JSValueConst *func_data) {
-  (void)this_val;
   (void)magic;
   ScrDyn *box = JS_GetOpaque(func_data[0], isl_dynfn_class_id);
   if (!box) return JS_ThrowTypeError(ctx, "detached scriptc function");
@@ -2072,9 +2110,13 @@ static JSValue isl_dynfn_invoke(JSContext *ctx, JSValueConst this_val, int argc,
   ScrDyn **dargs = argc <= 8 ? stack_args : malloc((size_t)argc * sizeof *dargs);
   for (int i = 0; i < argc; i++) dargs[i] = isl_dyn_from_value(argv[i]);
   bool strayed_before = isl_anchor_strayed;
+  ScrDyn *this_dyn = isl_dyn_from_value(this_val);
+  scr_dyn_this_push_dyn(this_dyn);
+  scr_dyn_release(this_dyn);
   isl_host_depth++;
   ScrDyn *r = box->v.fn.thunk(box->v.fn.clo, dargs, (size_t)argc);
   isl_host_depth--;
+  scr_dyn_this_pop();
   if (isl_anchor_strayed && !strayed_before) {
     /* The isl_hostfn_invoke re-anchor dance: a fiber the callback spawned
      * moved the engine's overflow anchor off this stack. */

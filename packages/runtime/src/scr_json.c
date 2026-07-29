@@ -695,6 +695,24 @@ ScrDyn *scr_dyn_call(const ScrDyn *d, ScrDyn *const *args, size_t argc, const ch
   return d->v.fn.thunk(d->v.fn.clo, args, argc);
 }
 
+/* Calling a resolved member with its receiver bound (`recv[key]?.()`'s
+ * taken path). Native closures observe the checked-dynamic ambient
+ * receiver; an engine callee needs the actual engine receiver as this_val,
+ * so the installed JSVAL ops own that arm. */
+ScrDyn *scr_dyn_call_with_this(const ScrDyn *d, const ScrDyn *recv, ScrDyn *const *args, size_t argc, const char *what) {
+  if (d->kind == SCR_DYN_JSVAL && recv->kind == SCR_DYN_JSVAL) {
+    return scr_dyn_jsval_ops()->call_with_this(d->v.jsval.cell, recv->v.jsval.cell, args, argc);
+  }
+  scr_dyn_this_push_dyn(recv);
+  ScrDyn *r = scr_dyn_call(d, args, argc, what);
+  scr_dyn_this_pop();
+  return r;
+}
+
+ScrDyn *scr_dyn_apply_with_this(const ScrDyn *d, const ScrDyn *recv, const ScrDyn *args, const char *what) {
+  return scr_dyn_call_with_this(d, recv, args->v.arr.items, args->v.arr.len, what);
+}
+
 /* scr_dyn_call over a dyn ARRAY's elements — the spread-application form
  * (`f(...args)` after the emitted argument array is built). Borrows both;
  * result owned (+1), or NULL with the exception pending. */

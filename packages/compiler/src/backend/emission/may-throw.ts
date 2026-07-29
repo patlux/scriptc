@@ -81,6 +81,10 @@ export function computeMayThrow(mod: IrModule): { fns: Set<string>; indirect: bo
           if (rec["fieldDyn"] === true) f.throws = true;
           break;
         case "dynCall":
+        // Optional computed-member calls can throw from the getter, key
+        // routing, argument evaluation, or the taken call itself.
+        case "dynOptKeyCall":
+        case "jsOptKeyCall":
         // Prototype dispatch throws the same family (not-a-function,
         // cannot-read, the loud unimplemented fence, callback throws).
         case "dynInvoke":
