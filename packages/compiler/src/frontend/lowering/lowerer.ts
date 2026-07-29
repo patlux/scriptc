@@ -5766,13 +5766,13 @@ export class Lowerer {
     return { kind: "union", unionId: this.unions.intern(rest) };
   }
 
-  /** The interned `T | undefined` union over a non-union arm type — the ABI
-   * type of a defaulted parameter, and the result type of lookups that may
-   * miss (process.env reads). "undefined" sorts last among all arm typeKeys,
-   * so the sorted pair is always [t, undefined]. */
+  /** The canonical IR representation of `T | undefined`: ordinarily an
+   * interned tagged union; dyn/jsval absorb undefined in their own value
+   * domain. Callers whose operation requires a physical union must reject
+   * the absorbing result explicitly instead of minting an invalid union. */
   withUndefinedArm(t: IrType): IrType {
-    const arms = [t, UNDEFINED_T].sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
-    return { kind: "union", unionId: this.unions.intern(arms) };
+    return withUndefinedArmCanonical(t, this.unions) ??
+      (() => { throw new Error(`lowerer bug: cannot add undefined to ${t.kind}`); })();
   }
 
   paramShape(param: ts.ParameterDeclaration): ParamShape {

@@ -108,6 +108,10 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // A generated provider catalog imported inside an opted-in package:
     // JSON-derived records stay bounded and native across the package edge.
     ["catalog-provider", "catalog-provider-cli.ts"],
+    // A package helper inferred separately for each checked argument shape:
+    // one helper returns number-or-undefined, and a second returns only
+    // undefined. Both must settle on valid IR representations.
+    ["status-unit-static", "status-unit-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, [pkg]);

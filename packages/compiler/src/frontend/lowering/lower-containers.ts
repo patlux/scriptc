@@ -317,7 +317,10 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
         );
       }
       const receiver = L.lowerExpr(access.expression);
-      return { kind: "arrIntrinsic", method: "shift", receiver, args: [], type: L.withUndefinedArm(elem), loc };
+      // any/unknown already carry undefined in their own representation;
+      // every other element type gets the tagged elem|undefined result.
+      const resultT = L.withUndefinedArm(elem);
+      return { kind: "arrIntrinsic", method: "shift", receiver, args: [], type: resultT, loc };
     }
     if (name === "join") {
       // The ambient declares join on every Array<T> (a per-element-type

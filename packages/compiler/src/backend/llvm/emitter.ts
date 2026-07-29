@@ -8713,13 +8713,16 @@ class LlEmitter {
       }
       case "shift": {
         // JS shift: undefined on an empty array, else the first element
-        // out (ref ownership moves into the union box) with the tail
-        // sliding down. Union construction is type-directed here.
-        if (e.type.kind !== "union") throw new Error("llvm emitter bug: shift result is not a union");
-        const def = this.unionsById.get(e.type.unionId);
+        // out with the tail sliding down. dyn/jsval carry undefined
+        // directly; typed elements move into their tagged result union.
+        const topValue = elem.kind === "dyn" || elem.kind === "jsval";
+        if (topValue && !typeEquals(e.type, elem)) throw new Error("llvm emitter bug: top-valued shift changed type");
+        if (!topValue && e.type.kind !== "union") throw new Error("llvm emitter bug: shift result is not a union");
+        const unionId = e.type.kind === "union" ? e.type.unionId : null;
+        const def = unionId !== null ? this.unionsById.get(unionId) : undefined;
         const tag = def ? def.arms.findIndex((a) => typeEquals(a, elem)) : -1;
-        const undefTag = this.undefinedArmTag(e.type);
-        if (tag < 0 || undefTag < 0) throw new Error("llvm emitter bug: shift union lacks its arms");
+        const undefTag = e.type.kind === "union" ? this.undefinedArmTag(e.type) : -1;
+        if (!topValue && (tag < 0 || undefTag < 0)) throw new Error("llvm emitter bug: shift union lacks its arms");
         this.declare(`declare double @scr_arr_len(ptr)`);
         const slot = B.slot();
         B.entryAllocas.push(`${slot} = alloca ptr`);
@@ -8732,13 +8735,36 @@ class LlEmitter {
         const lj = B.newLabel("shf.j");
         B.condBr(has, lp, la);
         B.startBlock(lp);
-        this.declare(`declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_shift_${acc}(ptr)`);
-        const v = B.tmp();
-        B.line(`${v} = call ${accTy} @scr_arr_shift_${acc}(ptr ${r.name})`);
-        B.line(`store ptr ${this.unionNewOwned(tag, { name: v, type: elem })}, ptr ${slot}`);
+        if (topValue) {
+          this.declare(`declare ptr @scr_arr_shift_ref(ptr)`);
+          const v = B.tmp();
+          B.line(`${v} = call ptr @scr_arr_shift_ref(ptr ${r.name})`);
+          B.line(`store ptr ${v}, ptr ${slot}`);
+        } else {
+          this.declare(`declare ${acc === "bool" ? "zeroext i1" : accTy} @scr_arr_shift_${acc}(ptr)`);
+          const v = B.tmp();
+          B.line(`${v} = call ${accTy} @scr_arr_shift_${acc}(ptr ${r.name})`);
+          B.line(`store ptr ${this.unionNewOwned(tag, { name: v, type: elem })}, ptr ${slot}`);
+        }
         B.br(lj);
         B.startBlock(la);
-        B.line(`store ptr ${this.unitInstanceRef(e.type.unionId, undefTag)}, ptr ${slot}`);
+        if (elem.kind === "dyn") {
+          this.declare(`declare ptr @scr_dyn_undefined()`);
+          this.declare(`declare ptr @scr_dyn_retain(ptr)`);
+          const u = B.tmp();
+          const held = B.tmp();
+          B.line(`${u} = call ptr @scr_dyn_undefined()`);
+          B.line(`${held} = call ptr @scr_dyn_retain(ptr ${u})`);
+          B.line(`store ptr ${held}, ptr ${slot}`);
+        } else if (elem.kind === "jsval") {
+          this.declare(`declare ptr @scr_jsval_undefined()`);
+          const u = B.tmp();
+          B.line(`${u} = call ptr @scr_jsval_undefined()`);
+          B.line(`store ptr ${u}, ptr ${slot}`);
+        } else {
+          if (unionId === null) throw new Error("llvm emitter bug: typed shift lost its union id");
+          B.line(`store ptr ${this.unitInstanceRef(unionId, undefTag)}, ptr ${slot}`);
+        }
         B.br(lj);
         B.startBlock(lj);
         const t = B.tmp();

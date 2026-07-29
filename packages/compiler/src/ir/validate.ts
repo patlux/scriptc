@@ -2362,18 +2362,26 @@ function validateFunction(
           err(`arrIntrinsic ${e.method} on union elements (frontend must reject)`, e.loc);
         }
         if (e.method === "shift") {
-          // The result is the interned `elem | undefined` union (union
-          // elements are frontend-fenced, so the arms never collide).
+          // Typed elements use the interned `elem | undefined` union.
+          // dyn/jsval elements absorb the miss in their own undefined value
+          // and therefore keep the element type (never an illegal union
+          // arm). Union elements remain frontend-fenced: their arms would
+          // collide with the miss arm.
           if (elem.kind === "union") {
             err("arrIntrinsic shift on union elements (frontend must reject)", e.loc);
-          }
-          const rdef = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
-          if (
-            !rdef ||
-            !rdef.arms.some((a) => a.kind === "undefinedT") ||
-            !rdef.arms.some((a) => typeEquals(a, elem))
-          ) {
-            err("arrIntrinsic shift result must be the elem|undefined union", e.loc);
+          } else if (elem.kind === "dyn" || elem.kind === "jsval") {
+            if (!typeEquals(e.type, elem)) {
+              err(`arrIntrinsic shift result must stay ${elem.kind}`, e.loc);
+            }
+          } else {
+            const rdef = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
+            if (
+              !rdef ||
+              !rdef.arms.some((a) => a.kind === "undefinedT") ||
+              !rdef.arms.some((a) => typeEquals(a, elem))
+            ) {
+              err("arrIntrinsic shift result must be the elem|undefined union", e.loc);
+            }
           }
         }
         // slice's indices and splice's count are optional (omitted args

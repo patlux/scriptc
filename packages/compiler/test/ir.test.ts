@@ -2,8 +2,8 @@ import { expect, test } from "vitest";
 import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
-import { BOOL, DYN, F64, STRING, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
 import { recursiveImplicitInstance, type GenericInstance } from "../src/frontend/lowering/lower-calls.js";
+import { BOOL, DYN, F64, JSVAL, STRING, VOID, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
 
 test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
@@ -27,6 +27,73 @@ test("all-arguments capture is part of function type identity and serialization"
   const malformed = structuredClone(fibModule);
   malformed.globals = [{ id: "%g.bad", name: "bad", type: { kind: "func", params: [], ret: F64, restAbi: "allDyn" }, mutable: false }];
   expect(validateModule(malformed).map((e) => e.message)).toContain('func type has restAbi "allDyn" without rest');
+});
+
+test("validator rejects invalid union arms and bare unit returns fail-closed", () => {
+  const loc = { file: "t.ts", start: 0, end: 0 };
+  const bad = structuredClone(fibModule);
+  bad.unions = [
+    { id: "u_jsval", arms: [{ kind: "jsval" }, { kind: "undefinedT" }] },
+    { id: "u_dyn", arms: [{ kind: "dyn" }, { kind: "nullT" }] },
+  ];
+  bad.functions.push({
+    name: "bareUndefined",
+    params: [],
+    returnType: { kind: "undefinedT" },
+    locals: [],
+    body: [
+      {
+        kind: "return",
+        value: { kind: "unitLit", unit: "undefined", type: { kind: "undefinedT" }, loc },
+        loc,
+      },
+    ],
+    loc,
+  });
+
+  const errors = validateModule(bad).map((e) => e.message);
+  expect(errors).toContain("union u_jsval: arm 0 is jsval");
+  expect(errors).toContain("union u_dyn: arm 0 is dyn");
+  expect(errors).toContain("in bareUndefined: return type is bare unit type undefinedT");
+  expect(errors).toContain("in bareUndefined: bare unitLit 'undefined' outside a unionWrap");
+});
+
+test("validator accepts shift results only in canonical top or tagged representations", () => {
+  const loc = { file: "t.ts", start: 0, end: 0 };
+  const make = (elem: IrType, result: IrType): IrModule => ({
+    irVersion: 3,
+    sourceFile: "t.ts",
+    entry: "__main",
+    unions: result.kind === "union"
+      ? [{ id: result.unionId, arms: [elem, { kind: "undefinedT" }] }]
+      : [],
+    functions: [{
+      name: "__main",
+      params: [],
+      returnType: VOID,
+      locals: [{ id: "xs.0", name: "xs", type: { kind: "array", elem }, mutable: false }],
+      body: [{
+        kind: "exprStmt",
+        expr: {
+          kind: "arrIntrinsic",
+          method: "shift",
+          receiver: { kind: "varRef", localId: "xs.0", type: { kind: "array", elem }, loc },
+          args: [],
+          type: result,
+          loc,
+        },
+        loc,
+      }],
+      loc,
+    }],
+  });
+
+  expect(validateModule(make(JSVAL, JSVAL))).toEqual([]);
+  expect(validateModule(make(DYN, DYN))).toEqual([]);
+  expect(validateModule(make(F64, { kind: "union", unionId: "u0" }))).toEqual([]);
+  expect(validateModule(make(JSVAL, { kind: "union", unionId: "u0" })).map((e) => e.message)).toContain(
+    "union u0: arm 0 is jsval",
+  );
 });
 
 test("validator rejects type mismatches and bad references", () => {

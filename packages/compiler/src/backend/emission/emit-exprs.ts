@@ -926,11 +926,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           case "shift": {
             // JS shift: undefined on an empty array, else the first
-            // element out (ref ownership moves into the union box) with
-            // the tail sliding down. Union construction is type-directed
-            // here, the envGet convention.
-            if (e.type.kind !== "union") throw new Error("emitter bug: shift result is not a union");
+            // element out with the tail sliding down. dyn/jsval carry
+            // undefined directly; typed elements move into their tagged
+            // elem|undefined result union.
             const elemT = e.receiver.type.elem;
+            if (elemT.kind === "dyn" || elemT.kind === "jsval") {
+              if (!typeEquals(e.type, elemT)) throw new Error("emitter bug: top-valued shift changed type");
+              const absent = elemT.kind === "dyn"
+                ? "scr_dyn_retain(scr_dyn_undefined())"
+                : "scr_jsval_undefined()";
+              return E.newTemp(e.type, `scr_arr_len(${r.name}) ? scr_arr_shift_ref(${r.name}) : ${absent}`);
+            }
+            if (e.type.kind !== "union") throw new Error("emitter bug: shift result is not a union");
             const def = E.unionsById.get(e.type.unionId);
             const tag = def ? def.arms.findIndex((a) => typeEquals(a, elemT)) : -1;
             const undefTag = E.undefinedArmTag(e.type);

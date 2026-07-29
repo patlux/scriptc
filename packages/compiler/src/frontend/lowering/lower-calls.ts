@@ -1566,10 +1566,18 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
         if (!distinct.some((t) => typeEquals(t, e.stmt.value.type))) distinct.push(e.stmt.value.type);
       }
       if (distinct.length === 0) {
-        final = DYN; // no valued return: JS completes with undefined — the dyn undefined, today's slot
+        // A return-expression spelled `undefined` lowers as the bare unit
+        // literal while inference is open. Unit kinds have no standalone
+        // function-result representation, so the settled slot is dyn's
+        // own undefined — never a bare undefinedT return.
+        final = DYN;
       } else if (distinct.length === 1) {
         const t = distinct[0]!;
-        final = !sawBare ? t : t.kind === "dyn" ? DYN : (L.withUndefinedArmOf(t) ?? DYN);
+        final = isUnitType(t)
+          ? DYN
+          : !sawBare
+            ? t
+            : (L.withUndefinedArmOf(t) ?? DYN);
       } else {
         final = DYN; // disagreeing returns: the checked-dynamic join
       }

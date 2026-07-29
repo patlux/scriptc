@@ -2747,11 +2747,18 @@ export function isUnitOnlyTsType(t: ts.Type): boolean {
 
 /** IR-level `t | undefined`, canonicalized and fenced exactly like the
  * ts-union branch of mapType (typeKey-sorted arms, deduplicated; map/
- * regex/dyn/void arms unrepresentable; a func arm IS representable — the
+ * regex/void arms unrepresentable; a func arm IS representable — the
  * result is exactly the nullable-callback shape mapType's union branch
  * admits, `(() => void) | undefined`) so the interned union is IDENTICAL
- * to what mapping the checker's own `T | undefined` produces. */
+ * to what mapping the checker's own `T | undefined` produces.
+ *
+ * The top representations absorb the added unit instead of becoming an
+ * illegal tagged union: dyn already carries the checked-dynamic undefined,
+ * and jsval carries the engine's undefined. This is the IR twin of
+ * mapType's direct-union collapse and keeps secondary union builders from
+ * ever interning `dyn | undefined` or `jsval | undefined`. */
 export function withUndefinedArm(t: IrType, unions: UnionRegistry): IrType | null {
+  if (t.kind === "dyn" || t.kind === "jsval") return t;
   if (t.kind === "union") {
     const def = unions.get(t.unionId);
     if (!def) return null;
@@ -2761,7 +2768,7 @@ export function withUndefinedArm(t: IrType, unions: UnionRegistry): IrType | nul
     return { kind: "union", unionId: unions.intern(arms) };
   }
   if (
-    t.kind === "void" || t.kind === "map" || t.kind === "dyn" ||
+    t.kind === "void" || t.kind === "map" ||
     // A bare unit field type cannot occur (units live only inside unions),
     // but guard against constructing a single-arm union from one.
     isUnitType(t)
