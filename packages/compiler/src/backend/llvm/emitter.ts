@@ -8750,11 +8750,11 @@ class LlEmitter {
         B.startBlock(la);
         if (elem.kind === "dyn") {
           this.declare(`declare ptr @scr_dyn_undefined()`);
-          this.declare(`declare ptr @scr_dyn_retain(ptr)`);
+          this.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
           const u = B.tmp();
           const held = B.tmp();
           B.line(`${u} = call ptr @scr_dyn_undefined()`);
-          B.line(`${held} = call ptr @scr_dyn_retain(ptr ${u})`);
+          B.line(`${held} = call ptr @scr_dyn_retain_v(ptr ${u})`);
           B.line(`store ptr ${held}, ptr ${slot}`);
         } else if (elem.kind === "jsval") {
           this.declare(`declare ptr @scr_jsval_undefined()`);
