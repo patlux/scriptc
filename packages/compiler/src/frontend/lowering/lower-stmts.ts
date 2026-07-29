@@ -270,7 +270,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     if (!decl || !ts.isVariableDeclaration(decl) || decl.name === undefined || !ts.isIdentifier(decl.name)) return false;
     if (!decl.initializer) return false;
     if ((ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) === 0) return false;
-    if (L.tdzPredeclared.has(symbol)) return false; // defensive: never twice
+    if (L.tdzPredeclared().has(symbol)) return false; // defensive: never twice
     // MODULE-scope consts are pre-registered globals (collectGlobals):
     // references resolve through globalOf after the local search fails, so
     // a TDZ box here would SHADOW the global and never fill (the top-level
@@ -300,7 +300,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
       entry.ctx.locals.push(local);
       entry.frame.set(symbol, local);
       entry.out.push({ kind: "varDecl", localId: local.id, init: null, loc: locOf(decl) });
-      L.tdzPredeclared.set(symbol, local);
+      L.tdzPredeclared(entry.ctx).set(symbol, local);
       return true;
     }
     return false;
@@ -319,7 +319,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
   export function predeclareForwardFnDecl(L: Lowerer, symbol: ts.Symbol): boolean {
     const decl = L.checker.valueDeclarationOf(symbol);
     if (!decl || !ts.isFunctionDeclaration(decl) || !decl.body || decl.typeParameters) return false;
-    if (L.hoistedFnDecls.has(decl)) return false; // defensive: never twice
+    if (L.hoistedFnDecls().has(decl)) return false; // defensive: never twice
     for (let i = L.activeStmtLists.length - 1; i >= 0; i--) {
       const entry = L.activeStmtLists[i]!;
       const idx = entry.stmts.indexOf(decl);
@@ -337,13 +337,13 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
       const depth = L.fnStack.indexOf(entry.ctx);
       const frameIdx = entry.ctx.scopes.indexOf(entry.frame);
       if (depth < 0 || frameIdx < 0) return false;
-      L.hoistedFnDecls.add(decl);
+      L.hoistedFnDecls(entry.ctx).add(decl);
       const fnTail = L.fnStack.splice(depth + 1);
       const scopeTail = entry.ctx.scopes.splice(frameIdx + 1);
       try {
         entry.out.push(L.lowerNestedFunctionDecl(decl));
       } catch (e) {
-        L.hoistedFnDecls.delete(decl);
+        L.hoistedFnDecls(entry.ctx).delete(decl);
         throw e;
       } finally {
         entry.ctx.scopes.push(...scopeTail);
@@ -438,12 +438,12 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
    * classic capture semantics fall out: closures made in a loop share the
    * single boxed binding, where `let` gets a fresh box per iteration. */
   export function hoistVarBinding(L: Lowerer, symbol: ts.Symbol, nameNode: ts.Identifier): IrLocal {
-    const existing = L.hoistedVars.get(symbol);
+    const existing = L.hoistedVars().get(symbol);
     if (existing) return existing;
     // The parameter merge: the symbol already binds a function-root local.
     const bound = L.bindingIn(L.ctx, symbol);
     if (bound) {
-      L.hoistedVars.set(symbol, bound);
+      L.hoistedVars().set(symbol, bound);
       return bound;
     }
     const type = varBindingType(L, nameNode);
@@ -461,7 +461,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     // engine undefined for jsval).
     const wrapped = type.kind === "dyn" ? dynUndefinedExpr(locOf(nameNode)) : L.unassignedSlotInit(type, locOf(nameNode));
     root.out.push({ kind: "varDecl", localId: local.id, init: wrapped, loc: locOf(nameNode) });
-    L.hoistedVars.set(symbol, local);
+    L.hoistedVars().set(symbol, local);
     return local;
   }
 
@@ -479,7 +479,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
    * would yield if the capture ran early, and guessing "it won't" is the
    * silent-wrong-output sin. */
   export function predeclareForwardVar(L: Lowerer, symbol: ts.Symbol): boolean {
-    if (L.hoistedVars.has(symbol)) return false; // would have resolved
+    if (L.hoistedVars().has(symbol)) return false; // would have resolved
     const decl = L.checker.valueDeclarationOf(symbol);
     if (!decl || !ts.isVariableDeclaration(decl) || !isVarDeclared(decl)) return false;
     const nameNode = ts.isIdentifier(decl.name) ? decl.name : null;
@@ -516,7 +516,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     ctx.locals.push(local);
     ctx.scopes[0]!.set(symbol, local);
     root.out.push({ kind: "varDecl", localId: local.id, init: wrapped, loc: locOf(decl) });
-    L.hoistedVars.set(symbol, local);
+    L.hoistedVars().set(symbol, local);
     return true;
   }
 
@@ -832,7 +832,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     if (ts.isFunctionDeclaration(stmt)) {
       // Already lowered eagerly by the forward-hoisting machinery
       // (predeclareForwardFnDecl) — the varDecl is in the list's output.
-      if (L.hoistedFnDecls.has(stmt)) return null;
+      if (L.hoistedFnDecls().has(stmt)) return null;
       return L.lowerNestedFunctionDecl(stmt);
     }
     // Enum declarations: constant-member enums emit nothing (member reads
@@ -933,7 +933,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
     const call = directMatchAllCallOf(L, decl.initializer);
     if (!call) return null;
     const sym = L.checker.getSymbolAtLocation(decl.name);
-    if (!sym || L.globalsBySymbol.has(sym) || L.tdzPredeclared.has(sym)) return null;
+    if (!sym || L.globalsBySymbol.has(sym) || L.tdzPredeclared().has(sym)) return null;
     const rowsT = arrayOf(arrayOf(STRING));
     const declared = L.mapTypeOf(L.typeOf(decl.name));
     if (!declared || !typeEquals(declared, rowsT)) return null;
@@ -1918,7 +1918,7 @@ export function lowerStmt(L: Lowerer, stmt: ts.Statement): IrStmt | IrStmt[] | n
         );
       }
       const symbol = L.checker.getSymbolAtLocation(el.name);
-      if (!symbol || L.tdzPredeclared.has(symbol)) {
+      if (!symbol || L.tdzPredeclared().has(symbol)) {
         L.unsupported("SC1031", el, `bindings with predeclared slots over the builtin global '${globalName}'`);
       }
       const g = L.globalsBySymbol.get(symbol);
@@ -2917,9 +2917,9 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // function in this scope captured it — predeclareForwardCapture): the
     // binding and its scope-entry varDecl already exist; the source
     // declaration is the one initializing `assign` into the shared box.
-    const pre = declSymbol ? L.tdzPredeclared.get(declSymbol) : undefined;
+    const pre = declSymbol ? L.tdzPredeclared().get(declSymbol) : undefined;
     if (pre && decl.initializer) {
-      L.tdzPredeclared.delete(declSymbol!);
+      L.tdzPredeclared().delete(declSymbol!);
       const init = L.lowerExprExpecting(decl.initializer, pre.type);
       return { kind: "assign", localId: pre.id, value: init, loc: locOf(decl) };
     }
@@ -3189,9 +3189,9 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // case): the binding and its scope-entry varDecl already exist, so
     // this declaration is the initializing `assign` into the shared box,
     // not a fresh local.
-    const preSelf = declSymbol ? L.tdzPredeclared.get(declSymbol) : undefined;
+    const preSelf = declSymbol ? L.tdzPredeclared().get(declSymbol) : undefined;
     if (preSelf) {
-      L.tdzPredeclared.delete(declSymbol!);
+      L.tdzPredeclared().delete(declSymbol!);
       init = L.coerceInto(decl.initializer, init, preSelf.type);
       return { kind: "assign", localId: preSelf.id, value: init, loc: locOf(decl) };
     }

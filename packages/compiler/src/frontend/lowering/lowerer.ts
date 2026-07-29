@@ -1089,20 +1089,18 @@ export class Lowerer {
     frame: Map<ts.Symbol, IrLocal>;
     out: IrStmt[];
   }[] = [];
-  /** Forward-captured consts pre-declared as TDZ boxes, keyed by symbol:
-   * lowerVarDecl consumes the entry when the source declaration arrives and
-   * emits the initializing `assign` instead of a fresh declaration. */
-  readonly tdzPredeclared = new Map<ts.Symbol, IrLocal>();
-  /** Nested function DECLARATIONS lowered eagerly by the forward-hoisting
-   * machinery (predeclareForwardFnDecl — a reference above the declaration
-   * in the same function, JS's function hoisting): the statement loop skips
-   * the source statement when it arrives. */
-  readonly hoistedFnDecls = new Set<ts.FunctionDeclaration>();
-  /** `var` bindings hoisted to their function root (hoistVarBinding), keyed
-   * by the checker's merged symbol — every same-name `var` in one function
-   * is one symbol, so one slot. Module-scope vars live in globalsBySymbol
-   * instead. */
-  readonly hoistedVars = new Map<ts.Symbol, IrLocal>();
+  /** Forward-captured consts pre-declared as TDZ boxes, per owning function
+   * context and symbol: one generic/implicit instance must never reuse the
+   * local minted for another instance of the same source body. */
+  readonly tdzPredeclaredByCtx = new WeakMap<FnCtx, Map<ts.Symbol, IrLocal>>();
+  /** Nested function declarations lowered eagerly by forward hoisting, per
+   * owning function context. The same AST declaration is lowered once in
+   * EACH monomorphic instance, not once for the whole Lowerer pass. */
+  readonly hoistedFnDeclsByCtx = new WeakMap<FnCtx, Set<ts.FunctionDeclaration>>();
+  /** `var` bindings hoisted to their function root, per function context.
+   * The checker symbol is shared when one source body is monomorphized; the
+   * IR local is not. Module-scope vars live in globalsBySymbol instead. */
+  readonly hoistedVarsByCtx = new WeakMap<FnCtx, Map<ts.Symbol, IrLocal>>();
   /** Per-file `var` module globals whose type carries an undefined arm:
    * lowerFileInit assigns them the interned undefined right after the
    * run-once guard — JS hoists module vars to `undefined` at entry, so a
@@ -1118,6 +1116,33 @@ export class Lowerer {
 
   get scopes(): Map<ts.Symbol, IrLocal>[] {
     return this.ctx.scopes;
+  }
+
+  tdzPredeclared(ctx: FnCtx = this.ctx): Map<ts.Symbol, IrLocal> {
+    let entries = this.tdzPredeclaredByCtx.get(ctx);
+    if (!entries) {
+      entries = new Map();
+      this.tdzPredeclaredByCtx.set(ctx, entries);
+    }
+    return entries;
+  }
+
+  hoistedFnDecls(ctx: FnCtx = this.ctx): Set<ts.FunctionDeclaration> {
+    let entries = this.hoistedFnDeclsByCtx.get(ctx);
+    if (!entries) {
+      entries = new Set();
+      this.hoistedFnDeclsByCtx.set(ctx, entries);
+    }
+    return entries;
+  }
+
+  hoistedVars(ctx: FnCtx = this.ctx): Map<ts.Symbol, IrLocal> {
+    let entries = this.hoistedVarsByCtx.get(ctx);
+    if (!entries) {
+      entries = new Map();
+      this.hoistedVarsByCtx.set(ctx, entries);
+    }
+    return entries;
   }
 
   /** Names of bodies the discovery pass reached; null lowers everything

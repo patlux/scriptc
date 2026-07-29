@@ -2026,6 +2026,7 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       L.implicitFns.push(fn);
     } catch (e) {
       if (!(e instanceof PoisonError)) throw e;
+      info.instances.delete(key);
       inst.implicitState = "done";
       throw e;
     }
