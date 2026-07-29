@@ -4264,17 +4264,30 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         return { kind: "assign", localId: target.id, value, loc: locOf(expr) };
       }
       if (opKind === ts.SyntaxKind.QuestionQuestionEqualsToken) {
-        // `x ??= e` on a VARIABLE, statement position: desugar to
-        // `x = x ?? e` (x read once, e lazy). For a plain variable JS's
-        // assign-only-when-nullish is unobservable — the value written back
-        // on the non-nullish path is the same box. Property targets keep a
-        // distinct fence: accessors would make the always-write observable.
-        if (!ts.isIdentifier(expr.left)) {
+        // Member `??=` is the generic reference form: receiver and computed
+        // key evaluate once, the current value is read once, and RHS/write
+        // happen only for null/undefined. Static record/class shapes and
+        // checked-dynamic values lower; unsound storage forms fail closed.
+        if (ts.isPropertyAccessExpression(expr.left)) {
+          const lowered = L.lowerNullishPropertyAssign(expr);
+          if (lowered) return lowered;
           L.unsupported(
             "SC1090",
             expr.left,
-            "'??=' on non-variable targets (write it out: if (o.f === undefined) o.f = v)",
+            "'??=' on this property target (requires a static record/class field or checked-dynamic receiver)",
           );
+        }
+        if (ts.isElementAccessExpression(expr.left)) {
+          const lowered = L.lowerNullishElementAssign(expr);
+          if (lowered) return lowered;
+          L.unsupported(
+            "SC1090",
+            expr.left,
+            "'??=' on this computed target (requires a static record key/index or checked-dynamic receiver)",
+          );
+        }
+        if (!ts.isIdentifier(expr.left)) {
+          L.unsupported("SC1090", expr.left, "'??=' on this assignment target");
         }
         const target = L.resolveWritable(expr.left);
         if (!target) L.rejectUnresolved(expr.left, `assignment to '${expr.left.text}' (not a writable local or module global)`);

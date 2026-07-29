@@ -90,11 +90,6 @@ function mixedDefault(x: string | undefined): string | number {
 }
 console.log(mixedDefault("s"));
 
-// `??=` writes through variables only; property targets could have
-// accessors, where assign-always vs assign-when-nullish is observable.
-const holder: { slot?: string } = {};
-holder.slot ??= "v";
-
 // `?.` on a multi-arm union: the guarded receiver is a sub-union.
 function chainSubUnion(x: number | string | undefined): number {
   return x?.valueOf === undefined ? 0 : 1;

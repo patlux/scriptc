@@ -1,0 +1,6 @@
+nullish-assignment.ts:5:1 - error SC1090: '??=' on this computed target (requires a static record key/index or checked-dynamic receiver) is not supported yet
+
+  4 | const arrayValues: (string | undefined)[] = [];
+  5 | arrayValues[0] ??= "x";
+    | ^~~~~~~~~~~~~~
+  6 |
