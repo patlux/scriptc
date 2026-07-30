@@ -1501,6 +1501,69 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
     return !!symbol && L.checker.declarationsOf(symbol).some((d) => L.isStdlibFile(d.getSourceFile()));
   }
 
+/** The exact no-ICU capability resolver used by pi-tui. The structural
+ * gate deliberately accepts only `function f(intl) { return
+ * intl?.Segmenter ?? null; }` called as `f(globalThis.Intl)`. */
+export function absentIntlSegmenterResolverCall(L: Lowerer, call: ts.CallExpression): boolean {
+  if (call.questionDotToken || call.arguments.length !== 1 || !ts.isIdentifier(call.expression)) return false;
+  const callee = call.expression;
+  const arg = call.arguments[0]!;
+  const isIntl =
+    stdlibGlobalNameOf(L, arg) === "Intl" ||
+    (ts.isPropertyAccessExpression(arg) && !arg.questionDotToken && arg.name.text === "Intl" &&
+      ts.isIdentifier(arg.expression) && arg.expression.text === "globalThis");
+  if (!isIntl) return false;
+  const sym = L.resolveValueSymbol(callee);
+  let fn = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+  if (!fn) {
+    fn = call.getSourceFile().statements.find(
+      (stmt): stmt is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(stmt) && stmt.name?.text === callee.text,
+    );
+  }
+  if (!fn || !ts.isFunctionDeclaration(fn) || !fn.body || fn.parameters.length !== 1) return false;
+  const param = fn.parameters[0]!;
+  if (!ts.isIdentifier(param.name) || fn.body.statements.length !== 1 || !ts.isReturnStatement(fn.body.statements[0]!)) return false;
+  let ret = fn.body.statements[0]!.expression;
+  if (!ret) return false;
+  while (ts.isParenthesizedExpression(ret)) ret = ret.expression;
+  if (!ts.isBinaryExpression(ret) || ret.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionToken) return false;
+  let left = ret.left;
+  while (ts.isParenthesizedExpression(left)) left = left.expression;
+  let right = ret.right;
+  while (ts.isParenthesizedExpression(right)) right = right.expression;
+  return (
+    ts.isPropertyAccessExpression(left) && !!left.questionDotToken && left.name.text === "Segmenter" &&
+    ts.isIdentifier(left.expression) && left.expression.text === param.name.text &&
+    right.kind === ts.SyntaxKind.NullKeyword
+  );
+}
+
+export function isAbsentIntlSegmenterBinding(L: Lowerer, ident: ts.Identifier): boolean {
+  const sym = L.resolveValueSymbol(ident);
+  let decl = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+  if (!decl) {
+    for (const sf of L.program.getSourceFiles()) {
+      for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt)) continue;
+        const found = stmt.declarationList.declarations.find(
+          (d) => ts.isIdentifier(d.name) && d.name.text === ident.text,
+        );
+        if (found) {
+          decl = found;
+          break;
+        }
+      }
+      if (decl) break;
+    }
+  }
+  return !!(
+    decl && ts.isVariableDeclaration(decl) && decl.initializer &&
+    (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) !== 0 &&
+    ts.isCallExpression(decl.initializer) && absentIntlSegmenterResolverCall(L, decl.initializer)
+  );
+}
+
 /** The canonical stdlib-global name `expr` denotes, or null. Three
    * spellings reach the same global (Node's own aliasing):
    *   - the bare identifier (`process`), name + provenance checked;

@@ -15,6 +15,7 @@ import { pureReemittable } from "./lower-exprs.js";
 import { lowerSearchParamsNew } from "./lower-builtins.js";
 import { requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { STREAM_API_MEMBERS, STREAM_PROP_MEMBERS, UNDERSCORE_METHODS, lowerStreamNew, lowerStreamSuperCall, streamCtorShape } from "./lower-stream.js";
+import { isAbsentIntlSegmenterBinding } from "./surfaces.js";
 import { emitOverrideShapeReason, emitSpecSuperForward, emitterRooted, lowerEmitterSuperCall, type EmitOverrideRec } from "./lower-emitter.js";
 import { declSymbolOf } from "./lower-modules.js";
 import { uniqueSymbolKeyOf } from "./lower-exprs.js";
@@ -4946,6 +4947,122 @@ function lowerProgramClassNew(L: Lowerer, expr: ts.NewExpression, info0: ClassIn
   const args = L.inheritsBuiltinErrorCtor(info)
     ? L.errorConstructorArgs(expr.arguments ?? [], loc, expr)
     : L.completeArgs(expr.arguments ?? [], info.ctorParams, loc, expr);
+  return {
+    kind: "new",
+    className: info.def.name,
+    args,
+    type: { kind: "object", className: info.def.name },
+    loc,
+  };
+}
+
+/** Recognizes the narrow pi-tui no-ICU factory shape:
+ *
+ *   const defaultCtor = resolve(globalThis.Intl);
+ *   function make(kind, C = defaultCtor) {
+ *     return C ? new C(...) : new Basic(kind);
+ *   }
+ *
+ * where resolve is exactly `intl?.Segmenter ?? null`. A scriptc binary
+ * links no ICU, so calls omitting C (or explicitly passing null/undefined)
+ * provably take the program-class fallback. Returns that class and the
+ * actual call argument forwarded to its constructor. */
+export function absentIntlSegmenterFallbackCall(
+  L: Lowerer,
+  call: ts.CallExpression,
+): { info: ClassInfo; args: readonly ts.Expression[] } | null {
+  if (!ts.isIdentifier(call.expression) || call.arguments.length < 1 || call.arguments.length > 2) return null;
+  const callee = call.expression;
+  const second = call.arguments[1];
+  if (
+    second !== undefined &&
+    second.kind !== ts.SyntaxKind.NullKeyword &&
+    !(ts.isIdentifier(second) && second.text === "undefined")
+  ) return null;
+  const fnSym = L.resolveValueSymbol(callee);
+  let fn = fnSym ? L.checker.valueDeclarationOf(fnSym) : undefined;
+  if (!fn) {
+    fn = call.getSourceFile().statements.find(
+      (stmt): stmt is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(stmt) && stmt.name?.text === callee.text,
+    );
+  }
+  if (!fn || !ts.isFunctionDeclaration(fn) || !fn.body || fn.parameters.length !== 2) return null;
+  const valueParam = fn.parameters[0]!;
+  const ctorParam = fn.parameters[1]!;
+  const ctorDefault = ctorParam.initializer;
+  if (!ts.isIdentifier(valueParam.name) || !ts.isIdentifier(ctorParam.name) || !ctorDefault || !ts.isIdentifier(ctorDefault)) return null;
+  if (!isAbsentIntlSegmenterBinding(L, ctorDefault)) return null;
+  if (fn.body.statements.length !== 1 || !ts.isReturnStatement(fn.body.statements[0]!)) return null;
+  let ret = fn.body.statements[0]!.expression;
+  if (!ret) return null;
+  while (ts.isParenthesizedExpression(ret)) ret = ret.expression;
+  if (!ts.isConditionalExpression(ret)) return null;
+  let cond = ret.condition;
+  while (ts.isParenthesizedExpression(cond)) cond = cond.expression;
+  if (!ts.isIdentifier(cond) || cond.text !== ctorParam.name.text) return null;
+  let dynamicNew = ret.whenTrue;
+  while (ts.isParenthesizedExpression(dynamicNew)) dynamicNew = dynamicNew.expression;
+  if (!ts.isNewExpression(dynamicNew) || !ts.isIdentifier(dynamicNew.expression) || dynamicNew.expression.text !== ctorParam.name.text) return null;
+  let fallback = ret.whenFalse;
+  while (ts.isParenthesizedExpression(fallback)) fallback = fallback.expression;
+  if (!ts.isNewExpression(fallback) || !ts.isIdentifier(fallback.expression)) return null;
+  const fallbackArgs = fallback.arguments ?? [];
+  if (
+    fallbackArgs.length !== 1 ||
+    !ts.isIdentifier(fallbackArgs[0]!) ||
+    fallbackArgs[0]!.text !== valueParam.name.text
+  ) return null;
+  const clsSym = L.resolveValueSymbol(fallback.expression);
+  const info = clsSym ? L.classBySymbol.get(clsSym) : undefined;
+  if (!info || info.generic || info.classDecorators?.valueGlobalId !== undefined) return null;
+  const arg0 = call.arguments[0];
+  if (!arg0) return null;
+  return { info, args: [arg0] };
+}
+
+/** A zero-argument getter returning a module const initialized by the exact
+ * no-ICU fallback factory. Emitted package JavaScript loses the getter's
+ * interface return annotation, so preserve the concrete program class at
+ * that boundary rather than boxing it as `any`. */
+export function absentIntlSegmenterGetterClass(
+  L: Lowerer,
+  decl: ts.SignatureDeclaration,
+): ClassInfo | null {
+  if (
+    !isJsSourceFile(decl.getSourceFile()) || !ts.isFunctionDeclaration(decl) ||
+    !decl.body || decl.parameters.length !== 0 || decl.body.statements.length !== 1
+  ) return null;
+  const stmt = decl.body.statements[0]!;
+  if (!ts.isReturnStatement(stmt) || !stmt.expression || !ts.isIdentifier(stmt.expression)) return null;
+  const bindingSym = L.resolveValueSymbol(stmt.expression);
+  const binding = bindingSym ? L.checker.valueDeclarationOf(bindingSym) : undefined;
+  if (
+    !binding || !ts.isVariableDeclaration(binding) || !binding.initializer ||
+    (ts.getCombinedNodeFlags(binding) & ts.NodeFlags.Const) === 0 ||
+    !ts.isCallExpression(binding.initializer)
+  ) return null;
+  return absentIntlSegmenterFallbackCall(L, binding.initializer)?.info ?? null;
+}
+
+export function absentIntlSegmenterGetterCallClass(
+  L: Lowerer,
+  call: ts.CallExpression,
+): ClassInfo | null {
+  if (call.questionDotToken || call.arguments.length !== 0 || !ts.isIdentifier(call.expression)) return null;
+  const sym = L.resolveValueSymbol(call.expression);
+  const decl = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+  return decl && ts.isFunctionDeclaration(decl) ? absentIntlSegmenterGetterClass(L, decl) : null;
+}
+
+export function lowerAbsentIntlSegmenterFallbackCall(L: Lowerer, call: ts.CallExpression): IrExpr | null {
+  const fallback = absentIntlSegmenterFallbackCall(L, call);
+  if (!fallback) return null;
+  const loc = locOf(call);
+  const { info } = fallback;
+  fenceDecorationThrows(L, info, call);
+  L.noteEdge(`%${info.def.name}.constructor`);
+  const args = L.completeArgs(fallback.args, info.ctorParams, loc, call);
   return {
     kind: "new",
     className: info.def.name,

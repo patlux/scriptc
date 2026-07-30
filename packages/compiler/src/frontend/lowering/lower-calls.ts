@@ -19,7 +19,7 @@ import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilter
 import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
 import { droppableStatic, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
-import { EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
+import { absentIntlSegmenterGetterClass, EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerAbsentIntlSegmenterFallbackCall, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
 import { lowerConsoleInspectArg, lowerFormatCall } from "./lower-inspect.js";
 import { STREAM_API_MEMBERS, lowerStreamMethodCall, lowerStreamModuleCall, lowerStreamStaticCall, streamSidesOf } from "./lower-stream.js";
@@ -932,7 +932,10 @@ export function collectSignatureInner(L: Lowerer, decl: ts.FunctionDeclaration):
       params.push({ type: DYN, mode: decl.parameters.length > 0 ? "arguments" : "dynRest" });
     }
     const nameBlame: ts.Node = decl.name ?? decl;
-    const returnType = L.declaredReturnType(decl, nameBlame);
+    const segmenterClass = absentIntlSegmenterGetterClass(L, decl);
+    const returnType: IrType = segmenterClass
+      ? { kind: "object", className: segmenterClass.def.name }
+      : L.declaredReturnType(decl, nameBlame);
     if (isAsync && returnType.kind !== "promise") {
       L.badType(nameBlame, L.typeOf(nameBlame));
     }
@@ -2836,6 +2839,15 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
 
 export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     const loc = locOf(expr);
+
+    // No-ICU host capability resolution: calls of the exact pi-tui
+    // Segmenter factory with an omitted/null constructor instantiate the
+    // program-declared BasicSegmenter branch directly. The unsupported Intl
+    // constructor branch never exists in a scriptc binary.
+    {
+      const fallback = lowerAbsentIntlSegmenterFallbackCall(L, expr);
+      if (fallback) return fallback;
+    }
 
     // A call whose chain ROOTS at an ambient-undefined name (`declare
     // const value: Y | undefined; value?.foo("a")`, `declare function
@@ -9164,7 +9176,12 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
   export function lowerObjectMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (L.chainBlocked(access, call)) return null;
-    const receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+    let receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+    let loweredReceiver: IrExpr | null = null;
+    if (receiverIr?.kind !== "object") {
+      loweredReceiver = L.lowerExpr(access.expression);
+      if (loweredReceiver.type.kind === "object") receiverIr = loweredReceiver.type;
+    }
     if (receiverIr?.kind !== "object") return null;
     const info = L.classes.get(receiverIr.className);
     if (!info) L.flushDeferredClass(receiverIr.className);
@@ -9253,7 +9270,7 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     }
     if (L.overrideBelow(info, method)) L.noteVirtualEdge(info, method);
     else L.noteEdge(`%${found.declarer.def.name}.${method}`);
-    const receiver = L.lowerExpr(access.expression);
+    const receiver = loweredReceiver ?? L.lowerExpr(access.expression);
     const args = L.completeArgs(call.arguments, found.sig.params, locOf(call), call);
     // Generator methods direct-call through their emitted spawn wrapper.
     // A virtual slot cannot point at the raw body (its return is TReturn),

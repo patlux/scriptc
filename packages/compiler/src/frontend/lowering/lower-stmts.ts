@@ -23,6 +23,7 @@ import { lowerHttpResPropertyAssignment, lowerServerCloseOverrideAssignment } fr
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireCalleeFileOf, createRequireNamespaceDecl } from "./lower-builtins.js";
 import { lowerEnumDeclaration } from "./lower-enums.js";
 import { abstractPropertyDeclOf, aliasTypeofNarrows, isMatchSliceType, lowerBuiltinPropertyAssignStmt, lowerDeleteExpression, lowerGroupsProjection, matchResultNamedGroupsOf, probeLower, pureReemittable, symbolFieldInfo } from "./lower-exprs.js";
+import { lowerAbsentIntlSegmenterFallbackCall } from "./lower-classes.js";
 import { UNSUPPORTED, checkerPanicDiag, isCheckerPanic, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import { canonicalBuiltinModule, isRelativeSpecifier } from "../shared.js";
@@ -2891,6 +2892,17 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     const declSymbol = L.checker.getSymbolAtLocation(decl.name);
     const g = declSymbol ? L.globalsBySymbol.get(declSymbol) : undefined;
     if (g) {
+      if (decl.initializer && ts.isCallExpression(decl.initializer)) {
+        const fallback = lowerAbsentIntlSegmenterFallbackCall(L, decl.initializer);
+        if (fallback) {
+          return {
+            kind: "assign",
+            localId: g.id,
+            value: L.coerceInto(decl.initializer, fallback, g.type),
+            loc: locOf(decl),
+          };
+        }
+      }
       if (!decl.initializer) {
         // `let x: string | undefined;` at file scope: READABLE before any
         // assignment — JS gives undefined, so the slot must hold the

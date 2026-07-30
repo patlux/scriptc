@@ -137,6 +137,10 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // skips nullish sources, applies multiple partial sources in order,
     // returns target identity, and releases/replaces nested ref values.
     ["object-assign-options-static", "object-assign-options-cli.ts"],
+    // pi-tui createTextSegmenter shape: the compiled host has no ICU, so
+    // globalThis.Intl.Segmenter resolves absent and the static fallback
+    // class stays a native class through calls, methods, and iteration.
+    ["segmenter-boundary-static", "segmenter-boundary-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, pkg.split(","));

@@ -22,7 +22,7 @@ import { collectNamespaceStmt, nsPathPrefix, trapDeclRootOf } from "./lower-name
 import { collectExpandoMembers } from "./lower-expando.js";
 import { isUnitOnlyTsType, unitOnlyUnion } from "../types.js";
 import type { ClassInfo } from "./lower-classes.js";
-import { decoratorNodesOf, genericIfaceBindingKeepsClass, guaranteedDecorationThrow } from "./lower-classes.js";
+import { absentIntlSegmenterFallbackCall, absentIntlSegmenterGetterCallClass, decoratorNodesOf, genericIfaceBindingKeepsClass, guaranteedDecorationThrow } from "./lower-classes.js";
 import { isMixinFnBinding, mixinResultBindingClassOf } from "./lower-mixins.js";
 
 /** One file's declarations, split for collection and init-body lowering. */
@@ -1261,6 +1261,32 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         for (const nameNode of boundIdentifiersOf(decl.name)) {
           const diagsBefore = L.diags.length;
           try {
+            // The no-ICU Segmenter factory call settles to its static
+            // fallback class even though emitted JavaScript types the call
+            // as any. Register that concrete class global so later method
+            // calls/iteration remain fully static.
+            if (
+              isJsSourceFile(sf) && ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              decl.initializer !== undefined && ts.isCallExpression(decl.initializer)
+            ) {
+              const fallback = absentIntlSegmenterFallbackCall(L, decl.initializer);
+              const getterClass = absentIntlSegmenterGetterCallClass(L, decl.initializer);
+              const classInfo = fallback?.info ?? getterClass;
+              if (classInfo) {
+                const symbol = L.checker.getSymbolAtLocation(nameNode);
+                if (symbol && !L.globalsBySymbol.has(symbol)) {
+                  const g: IrGlobal = {
+                    id: `%g.${tag}${nsPrefix}${nameNode.text}`,
+                    name: nameNode.text,
+                    type: { kind: "object", className: classInfo.def.name },
+                    mutable: isLet,
+                  };
+                  L.globalsBySymbol.set(symbol, g);
+                  L.globalsList.push(g);
+                }
+                continue;
+              }
+            }
             // A JS file-scope evolving ARRAY (`const mustCallChecks = [];`
             // — test/common's exit-accounting ledger): the strict type
             // (any[]) has no mapping, but the VALUE is the dyn array the
