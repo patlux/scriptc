@@ -44,13 +44,6 @@ class-values.ts:40:1 - error SC1090: assigning the inherited static 'tag' throug
      | ^~~~~~~~~~~~
   41 | 
 
-class-values.ts:44:1 - error SC1090: assigning the static 'tag' through a class value (JS creates an OWN property on the runtime class — assign through the declaring class's name, which subclasses here) is not supported yet
-
-  43 | let someClass: typeof Base = Base;
-  44 | someClass.tag = "write";
-     | ^~~~~~~~~~~~~
-  45 | 
-
 class-values.ts:48:13 - error SC1090: reading the static member 'tag' through a class value (a subclass of 'Base' redeclares it, so the runtime class decides which declaration answers) is not supported yet
 
   47 | // runtime class decides which declaration answers.

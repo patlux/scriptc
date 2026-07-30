@@ -10,4 +10,4 @@ buffer-constructor-value.ts:8:1 - error SC1090: constructing values other than c
   7 | console.log(ctor.poolSize); // unsupported Buffer static still fails closed
   8 | new ctor(4); // constructor call-through remains unsupported
     | ^~~~~~~~~~~
-  9 |
+  9 | // Keep a real trailing frame line instead of the synthetic EOF line.

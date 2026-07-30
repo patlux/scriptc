@@ -8272,6 +8272,15 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
         !L.diags.slice(diagsBefore).some((d) => d.code === "SC9001")
       ) {
         const captured = L.diags.splice(diagsBefore);
+        if (!L.suppressStats) {
+          // This poison belongs to the function declaration statement: its
+          // parameter/prologue could not lower, so calling the emitted
+          // fence function throws. Keep coverage's fail-closed statement
+          // accounting exact even though the poison happened outside the
+          // body statement loop.
+          L.stats.statementsFailed++;
+          L.bumpFileStat(decl.getSourceFile().fileName, "failed");
+        }
         L.runtimeFences.push(...captured);
         // An ABI type naming a class that never REGISTERED (the sentence-
         // walker idiom's path type — the #private fence) is fine to emit:
@@ -9400,8 +9409,14 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     let receiverIr = L.mapTypeOf(L.typeOf(access.expression));
     let loweredReceiver: IrExpr | null = null;
     if (receiverIr?.kind !== "object") {
-      loweredReceiver = L.lowerExpr(access.expression);
-      if (loweredReceiver.type.kind === "object") receiverIr = loweredReceiver.type;
+      // Some admitted boundaries expose a concrete program object only
+      // after lowering (the no-ICU Segmenter fallback). Probe without
+      // committing the receiver's own fence: if it cannot lower, the
+      // method/member chokepoints below must retain the more specific
+      // diagnostic for `receiver.member(...)`, not degrade to the root or
+      // a blocked-binding cascade.
+      loweredReceiver = probeLower(L, access.expression);
+      if (loweredReceiver?.type.kind === "object") receiverIr = loweredReceiver.type;
     }
     if (receiverIr?.kind !== "object") return null;
     const info = L.classes.get(receiverIr.className);
