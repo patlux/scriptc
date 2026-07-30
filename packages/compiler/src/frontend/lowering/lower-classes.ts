@@ -2903,6 +2903,106 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     return { kind: "closure", fnName, captures: [], type: funcType, loc };
   }
 
+/** A concrete class instance method read (`obj.method`) becomes a FRESH
+   * closure capturing the receiver. The lifted forwarding body is interned
+   * per static receiver/member/signature, but every read allocates its own
+   * closure, so `obj.m === obj.m` is false while a field initialized once
+   * from `this.m` reuses that one stored closure. The forwarding call keeps
+   * direct devirtualization when sound and uses the vtable when a strict
+   * descendant overrides; async/generator targets enter through their
+   * ordinary spawn wrappers via the backend's normal call target routing. */
+  export function lowerBoundMethodValue(
+    L: Lowerer,
+    access: ts.PropertyAccessExpression,
+    info: ClassInfo,
+    found: {
+      declarer: ClassInfo;
+      sig: { params: ParamShape[]; ret: IrType; abstract?: true; async?: true; gen?: { yieldT: IrType; nextT: IrType } };
+      fnName?: string;
+    },
+  ): IrExpr {
+    const method = access.name.text;
+    const loc = locOf(access);
+    if (found.sig.abstract === true && !L.overrideBelow(info, method)) {
+      L.unsupported(
+        "SC1090",
+        access,
+        `a bound reference to the abstract method '${method}' with no concrete implementation below the receiver's static class`,
+      );
+    }
+    const funcType: IrType = {
+      kind: "func",
+      params: found.sig.params
+        .filter((p) => p.mode !== "dynRest" && p.mode !== "arguments")
+        .map((p) => p.type),
+      ret: found.sig.ret,
+      ...(found.sig.params.some((p) => p.mode === "dynRest" || p.mode === "arguments") ? { rest: true as const } : {}),
+      ...(found.sig.params.some((p) => p.mode === "arguments") ? { restAbi: "allDyn" as const } : {}),
+    };
+    L.requireExactArityValue(access, access, found.sig.params, funcType);
+    const sourceFn = found.fnName ?? `%${found.declarer.def.name}.${method}`;
+    const virtual = found.fnName === undefined && L.overrideBelow(info, method);
+    if (virtual) L.noteVirtualEdge(info, method);
+    else L.noteEdge(sourceFn);
+    const key = `${info.def.name}:${method}:${sourceFn}:${typeKey(funcType)}:${virtual ? "v" : "d"}`;
+    let fnName = L.boundMethodValueFns.get(key);
+    if (!fnName) {
+      fnName = `%bound.method.${L.boundMethodValueFns.size}`;
+      L.boundMethodValueFns.set(key, fnName);
+      const recvType: IrType = { kind: "object", className: info.def.name };
+      const params: IrParam[] = funcType.params.map((type, i) => ({
+        localId: `a${i}.0`,
+        name: `a${i}`,
+        type,
+      }));
+      const recvRef: IrExpr = { kind: "varRef", localId: "this.0", type: recvType, loc };
+      const argRefs = params.map((p): IrExpr => ({ kind: "varRef", localId: p.localId, type: p.type, loc }));
+      const call: IrExpr = virtual
+        ? {
+            kind: "virtualCall",
+            className: info.def.name,
+            method,
+            args: [recvRef, ...argRefs],
+            type: found.sig.ret,
+            loc,
+          }
+        : {
+            kind: "call",
+            callee: sourceFn,
+            args: [L.upcastTo(recvRef, found.declarer.def.name), ...argRefs],
+            type: found.sig.ret,
+            loc,
+          };
+      L.liftedFns.push({
+        name: fnName,
+        params,
+        returnType: found.sig.ret,
+        captures: [{ localId: "this.0", name: "this", type: recvType }],
+        locals: [
+          { id: "this.0", name: "this", type: recvType, mutable: false, boxed: true },
+          ...params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+        ],
+        body: found.sig.ret.kind === "void"
+          ? [{ kind: "exprStmt", expr: call, loc }, { kind: "return", value: null, loc }]
+          : [{ kind: "return", value: call, loc }],
+        loc,
+      });
+    }
+    const recv = L.lowerExpr(access.expression);
+    if (recv.type.kind !== "object" || recv.type.className !== info.def.name) {
+      L.unsupported("SC1090", access.expression, "bound method references on dynamic or unknown receivers");
+    }
+    const temp = L.declareHiddenLocal("%boundthis", recv.type);
+    temp.boxed = true;
+    return {
+      kind: "seqExpr",
+      stmts: [{ kind: "varDecl", localId: temp.id, init: recv, loc }],
+      result: { kind: "closure", fnName, captures: [temp.id], type: funcType, loc },
+      type: funcType,
+      loc,
+    };
+  }
+
 /** The class itself taken as a VALUE (`const X = C`, an argument, an
    * array element, a class expression's result): the classRef over the
    * per-class immortal class object. The construct thunk needs a thunk-

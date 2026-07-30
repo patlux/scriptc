@@ -21,8 +21,8 @@ import { fenceEnumObjectValue, lowerEnumAccess } from "./lower-enums.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, contextualUndefReadType, fenceEarlyAliasUse, fenceEarlyNsMemberRef, lowerNsIdentifierValue, nsMemberIdentOf, nsUndefRead, nsWritableTarget } from "./lower-namespaces.js";
 import { expandoMemberRead, expandoWritableTarget } from "./lower-expando.js";
 import { lowerSocketInstanceOf, lowerTlsRootCertificates } from "./lower-server.js";
-import { findGenericMethodOn, lowerStaticFieldRead } from "./lower-classes.js";
-import { bindingNeverReassigned, implicitMonoFile, lowerTaggedTemplate, nullishGenericBindingUnitOf, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
+import { findGenericMethodOn, lowerBoundMethodValue, lowerStaticFieldRead } from "./lower-classes.js";
+import { bindingNeverReassigned, implicitDefaultInstance, implicitMonoFile, lowerTaggedTemplate, nullishGenericBindingUnitOf, objLitGenericFnInfoOf, objLitGenericFnNodeOf, requireObjLitGenericReceiver } from "./lower-calls.js";
 import { mixinFnOfCallee } from "./lower-mixins.js";
 import { isConstAssertionTypeNode, isGenericCallableMemberType, underConstAssertion, unitOnlyUnion } from "../types.js";
 import { lowerYield } from "./lower-generators.js";
@@ -10494,21 +10494,56 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
   }
 
 /** Field read `obj.f` on class-instance and record receivers, through the
-   * shared FieldTarget union (fieldGet / recordGet). Bound method references
-   * on classes are rejected specifically; func-typed record fields are
-   * ordinary closure values, so bare references to them work (unlike class
-   * methods, which have no bound-value form). */
+   * shared FieldTarget union (fieldGet / recordGet). Concrete program-class
+   * methods become fresh receiver-capturing closures; func-typed record
+   * fields remain ordinary closure values. */
   export function lowerFieldRead(L: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
     const target = L.fieldTarget(expr);
     if (target) return L.fieldGetExpr(target, locOf(expr), expr);
     if (expr.questionDotToken) return null;
-    const receiverIr = L.mapTypeOf(L.typeOf(expr.expression));
-    if (
-      receiverIr?.kind === "object" &&
-      (L.findMethodOn(L.classes.get(receiverIr.className) ?? null, expr.name.text) ||
-        findGenericMethodOn(L, L.classes.get(receiverIr.className) ?? null, expr.name.text))
-    ) {
-      L.unsupported("SC1090", expr, `bound method references (call '${expr.name.text}' directly)`);
+    const mappedReceiver = L.mapTypeOf(L.typeOf(expr.expression));
+    const receiverIr =
+      expr.expression.kind === ts.SyntaxKind.ThisKeyword
+        ? (L.resolveThis()?.type ?? mappedReceiver)
+        : mappedReceiver;
+    if (receiverIr?.kind === "object") {
+      const info = L.classes.get(receiverIr.className) ?? null;
+      const found = L.findMethodOn(info, expr.name.text);
+      if (info && found) {
+        if (expr.name.text.startsWith("#")) {
+          L.unsupported(
+            "SC1090",
+            expr,
+            `private method references (call '${expr.name.text}' directly or bind explicitly)`,
+          );
+        }
+        return lowerBoundMethodValue(L, expr, info, found);
+      }
+      const generic = findGenericMethodOn(L, info, expr.name.text);
+      if (info && generic?.info.implicitParams) {
+        const inst = implicitDefaultInstance(L, expr, generic.info);
+        return lowerBoundMethodValue(L, expr, info, {
+          declarer: generic.declarer,
+          sig: {
+            params: inst.params,
+            ret: inst.returnType,
+            ...(generic.info.decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true
+              ? { async: true as const }
+              : {}),
+            ...(generic.info.decl.asteriskToken !== undefined && inst.returnType.kind === "generator"
+              ? { gen: { yieldT: inst.returnType.yieldT, nextT: inst.returnType.nextT } }
+              : {}),
+          },
+          fnName: inst.name,
+        });
+      }
+      if (generic) {
+        L.unsupported(
+          "SC1090",
+          expr,
+          `generic bound method references without a pinned concrete signature (annotate the destination or call '${expr.name.text}' directly)`,
+        );
+      }
     }
     // An object-literal GENERIC method as a VALUE (`o.m` — the member is
     // excluded from the record shape): the pinned-value rule verbatim when

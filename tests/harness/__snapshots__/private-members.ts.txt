@@ -19,7 +19,7 @@ private-members.ts:22:13 - error SC1090: method calls like 'rs.read' is not supp
      |             ^~~~~~~~~
   23 | 
 
-private-members.ts:32:15 - error SC1090: bound method references (call '#m' directly) are not supported yet
+private-members.ts:32:15 - error SC1090: private method references (call '#m' directly or bind explicitly) are not supported yet
 
   31 |   grab(): () => number {
   32 |     const f = this.#m;

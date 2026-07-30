@@ -4171,8 +4171,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // island path (bytes never cross the boundary).
         L.lowerBytesMethodCall(expr, expr.expression) ??
         L.lowerBufferStaticCall(expr, expr.expression) ??
-        // URLSearchParams method values through call/apply/bind must claim
-        // before the generic stdlib Function.prototype member fence.
+        // Program-class bound methods and URLSearchParams method values
+        // through call/apply/bind must claim before the generic stdlib
+        // Function.prototype member fence.
+        lowerBoundFunctionPrototypeCall(L, expr, expr.expression) ??
         lowerSearchParamsMethodValueInvoke(L, expr, expr.expression) ??
         lowerSearchParamsBindCall(L, expr, expr.expression) ??
         // URL.revokeObjectURL's zero-argument contract (the one-argument
@@ -9087,6 +9089,159 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     const sym = L.resolveValueSymbol(callee.expression);
     if (!sym || !L.isStdlibSymbol(sym)) return null;
     return nodeThrowExpr(1, "ERR_MISSING_ARGS", 'The "url" argument must be specified', VOID, locOf(call));
+  }
+
+  /** Whether `node` is statically known to hold a program-class bound
+   * method value. Besides a direct `obj.m`, follow one initializer hop for
+   * detached locals and class fields (`options = this.setOptions`). This is
+   * deliberately provenance-tight: arbitrary func values keep the existing
+   * Function.prototype fence, and dynamic/unknown receivers never enter. */
+  function boundMethodValueOrigin(L: Lowerer, node: ts.Expression,
+    seen = new Set<ts.Symbol>(),): ts.PropertyAccessExpression | null {
+    let value = node;
+    while (ts.isParenthesizedExpression(value)) value = value.expression;
+    if (ts.isPropertyAccessExpression(value)) {
+      const recv = L.mapTypeOf(L.typeOf(value.expression));
+      const info = recv?.kind === "object" ? L.classes.get(recv.className) : undefined;
+      if (info && L.findMethodOn(info, value.name.text)) return value;
+      const prop = L.checker.getPropertyOfType(L.typeOf(value.expression), value.name.text);
+      if (!prop || seen.has(prop)) return null;
+      seen.add(prop);
+      const decl = L.checker.valueDeclarationOf(prop);
+      if (decl && ts.isPropertyDeclaration(decl) && decl.initializer) {
+        return boundMethodValueOrigin(L, decl.initializer, seen);
+      }
+      return null;
+    }
+    if (!ts.isIdentifier(value)) return null;
+    const sym = L.resolveValueSymbol(value);
+    if (!sym || seen.has(sym)) return null;
+    seen.add(sym);
+    const decl = L.checker.valueDeclarationOf(sym);
+    if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
+      return boundMethodValueOrigin(L, decl.initializer, seen);
+    }
+    return null;
+  }
+
+  /** Function.prototype.call/apply/bind over a proven program-class bound
+   * method. The bound receiver always wins: call/apply's thisArg is merely
+   * evaluated, and bind ignores it while returning a fresh forwarding
+   * closure. The completed func signature supplies argument/return
+   * adaptation; apply accepts the same deterministic inline-list subset as
+   * the URLSearchParams lane. */
+  function lowerBoundFunctionPrototypeCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    const op = access.name.text;
+    if (op !== "call" && op !== "apply" && op !== "bind") return null;
+    if (boundMethodValueOrigin(L, access.expression) === null) return null;
+    const loc = locOf(call);
+    const source = L.lowerExpr(access.expression);
+    if (source.type.kind !== "func") return null;
+    const fnType = source.type;
+    const thisArg = call.arguments[0];
+    const thisValue = thisArg ? L.lowerExpr(thisArg) : null;
+    const sourceTemp = L.declareHiddenLocal("%boundfn", fnType);
+    const sourceRef = (): IrExpr => ({ kind: "varRef", localId: sourceTemp.id, type: fnType, loc });
+    const prefix: IrStmt[] = [{ kind: "varDecl", localId: sourceTemp.id, init: source, loc }];
+    if (thisValue && !droppableStatic(thisValue)) {
+      prefix.push({ kind: "exprStmt", expr: thisValue, loc: locOf(thisArg!) });
+    }
+    if (op === "bind") {
+      if (call.arguments.length > 1) {
+        L.unsupported("SC1090", call, "partial arguments in bind of a bound class method");
+      }
+      sourceTemp.boxed = true;
+      const key = typeKey(fnType);
+      let fnName = L.reboundMethodValueFns.get(key);
+      if (!fnName) {
+        fnName = `%bound.rebind.${L.reboundMethodValueFns.size}`;
+        L.reboundMethodValueFns.set(key, fnName);
+        const params: IrParam[] = fnType.params.map((type, i) => ({
+          localId: `a${i}.0`,
+          name: `a${i}`,
+          type,
+        }));
+        const invoke: IrExpr = {
+          kind: "callValue",
+          callee: { kind: "varRef", localId: "f.0", type: fnType, loc },
+          args: params.map((p): IrExpr => ({ kind: "varRef", localId: p.localId, type: p.type, loc })),
+          type: fnType.ret,
+          loc,
+        };
+        L.liftedFns.push({
+          name: fnName,
+          params,
+          returnType: fnType.ret,
+          captures: [{ localId: "f.0", name: "f", type: fnType }],
+          locals: [
+            { id: "f.0", name: "f", type: fnType, mutable: false, boxed: true },
+            ...params.map((p) => ({ id: p.localId, name: p.name, type: p.type, mutable: false })),
+          ],
+          body: fnType.ret.kind === "void"
+            ? [{ kind: "exprStmt", expr: invoke, loc }, { kind: "return", value: null, loc }]
+            : [{ kind: "return", value: invoke, loc }],
+          loc,
+        });
+      }
+      return {
+        kind: "seqExpr",
+        stmts: prefix,
+        result: { kind: "closure", fnName, captures: [sourceTemp.id], type: fnType, loc },
+        type: fnType,
+        loc,
+      };
+    }
+    let argNodes: readonly ts.Expression[];
+    if (op === "call") {
+      argNodes = call.arguments.slice(1);
+    } else {
+      const list = call.arguments[1];
+      if (!list || list.kind === ts.SyntaxKind.NullKeyword ||
+          (ts.isIdentifier(list) && list.text === "undefined")) {
+        argNodes = [];
+      } else if (ts.isArrayLiteralExpression(list) && list.elements.every((e) => !ts.isSpreadElement(e))) {
+        argNodes = list.elements;
+      } else {
+        L.unsupported(
+          "SC1090",
+          list,
+          "apply on a bound class method with a non-literal argument list (pass an inline array, null, or undefined)",
+        );
+      }
+      for (const extra of call.arguments.slice(2)) {
+        const value = L.lowerExpr(extra);
+        if (!droppableStatic(value)) {
+          L.unsupported("SC1090", extra, "effectful surplus arguments to Function.prototype.apply");
+        }
+      }
+    }
+    if (argNodes.some((a) => ts.isSpreadElement(a))) {
+      L.unsupported("SC1090", call, `spread arguments in Function.prototype.${op} on a bound class method`);
+    }
+    const args = argNodes.slice(0, fnType.params.length).map(
+      (a, i) => L.lowerExprExpecting(a, fnType.params[i]),
+    );
+    for (let i = args.length; i < fnType.params.length; i++) {
+      const absent = omittedArgFor(L, fnType.params[i]!, loc);
+      if (!absent) {
+        L.unsupported("SC1090", call, "calls omitting a non-optional parameter of the bound method's type");
+      }
+      args.push(absent);
+    }
+    for (const extra of argNodes.slice(fnType.params.length)) {
+      const value = L.lowerExpr(extra);
+      if (!droppableStatic(value)) {
+        L.unsupported("SC1090", extra, "effectful surplus arguments to a bound class method");
+      }
+    }
+    return {
+      kind: "seqExpr",
+      stmts: prefix,
+      result: { kind: "callValue", callee: sourceRef(), args, type: fnType.ret, loc },
+      type: fnType.ret,
+      loc,
+    };
   }
 
   const SP_BRAND_METHODS = new Set([

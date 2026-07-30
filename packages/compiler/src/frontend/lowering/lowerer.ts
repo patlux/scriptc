@@ -963,6 +963,16 @@ export class Lowerer {
   /** URLSearchParams prototype-method closures, interned per method,
    * value signature, and optional bound receiver. */
   readonly spMethodValueFns = new Map<string, string>();
+  /** Program-class bound-method forwarding closures, interned by static
+   * receiver, member, and completed function signature. Every extraction
+   * still allocates a fresh closure; only the lifted forwarding body is
+   * shared. */
+  readonly boundMethodValueFns = new Map<string, string>();
+  /** Re-bind forwarding closures for an already-bound program method.
+   * Function.prototype.bind ignores its new receiver but returns a fresh
+   * function object, so the lifted body is shared while each bind captures
+   * the source closure in a new environment. */
+  readonly reboundMethodValueFns = new Map<string, string>();
   /** The primitive-constructor VALUES (`String`/`Number`/`Boolean` as
    * bare identifiers — CLI option tables store and compare them): one
    * synthesized coercion function per constructor per program, interned

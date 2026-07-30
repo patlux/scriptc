@@ -67,9 +67,9 @@ interface HasGeneric {
 const viaInterface: HasGeneric = { m<T>(x: T): T { return x; } };
 console.log(viaInterface.m(5));
 
-// Generic methods as VALUES: bound-method references stay fenced (class
-// receivers), and an unpinned object-literal reference keeps the
-// generic-value fence.
+// Generic methods as VALUES: an unpinned class method reference stays
+// fenced, and an unpinned object-literal reference keeps the generic-value
+// fence.
 class Inst {
   g<T>(x: T): T {
     return x;
