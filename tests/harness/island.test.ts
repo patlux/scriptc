@@ -337,7 +337,7 @@ console.log(__island_eval("Promise.reject(new TypeError('island second')); 'arme
     expect(r.stderr).toBe("Unhandled promise rejection: RangeError: static first\n");
   });
 
-  test("--dynamic does not change emitted C for island-free programs", async () => {
+  test("--dynamic changes island-free C only by adding runtime-trace inventory", async () => {
     const source = `function greet(who: string): string {
   return "hello " + who;
 }
@@ -351,7 +351,12 @@ console.log(greet("world"), 6 * 7);
     ]);
     const body = (r: BuildResult) =>
       readFileSync(r.cPath, "utf8").replaceAll(dirname(r.cPath), "OUTDIR");
-    expect(body(dyn)).toBe(body(stat));
+    const withoutRuntimeTraceInventory = (source: string) =>
+      source
+        .replace(/static const char \*const sc_trace_modules\[\d+\] = \{\n(?:  ".*",\n)*\};\n\n/u, "")
+        .replace(/^  scr_island_trace_module_executed\(\d+\);\n/gmu, "")
+        .replace(/^  scr_island_trace_metadata\(.*\);\n/gmu, "");
+    expect(withoutRuntimeTraceInventory(body(dyn))).toBe(body(stat));
   });
 
   test("static hello-world stays in its size class; island use pays the engine", async () => {
