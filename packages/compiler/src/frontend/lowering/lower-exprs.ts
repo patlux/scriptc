@@ -6372,18 +6372,21 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     return test;
   }
 
-/** Shared `??=` statement shape after the lvalue reference has been made
+/** Shared `??=` value shape after the lvalue reference has been made
    * stable. `prefix` evaluates receiver/key in source order, `read` runs
-   * exactly once, and the RHS plus write live only in the nullish branch. */
+   * exactly once, and the RHS plus write live only in the nullish branch.
+   * The `nullish` node also preserves the compound expression's value: the
+   * existing non-nullish value, or the assigned RHS after slot coercion. */
   function lowerStableNullishAssign(
     L: Lowerer,
     prefix: IrStmt[],
     read: IrExpr,
     slotType: IrType,
+    resultType: IrType,
     right: ts.Expression,
     write: (value: IrExpr) => IrStmt,
     loc: SrcLoc,
-  ): IrStmt {
+  ): IrExpr {
     if (read.type.kind === "jsval") {
       L.unsupported(
         "SC1090",
@@ -6391,22 +6394,91 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         "'??=' through island-backed properties or indices (use a statically shaped record or checked-dynamic value)",
       );
     }
-    const current = L.declareHiddenLocal("%nullishValue", read.type);
-    const currentRef: IrExpr = { kind: "varRef", localId: current.id, type: read.type, loc };
-    const body: IrStmt[] = [...prefix, { kind: "varDecl", localId: current.id, init: read, loc }];
-    const test = nullishAssignTest(L, currentRef, loc);
-    if (test) {
-      const value = L.lowerExprExpecting(right, slotType);
-      body.push({ kind: "if", cond: test, then: [write(value)], else_: null, loc });
+    const wrap = (result: IrExpr): IrExpr =>
+      prefix.length === 0
+        ? result
+        : { kind: "seqExpr", stmts: prefix, result, type: result.type, loc };
+    const testable = nullishAssignTest(L, read, loc);
+    if (!testable) {
+      const present = L.coerceToExpected(read, resultType);
+      if (!typeEquals(present.type, resultType)) {
+        L.unsupported("SC1090", right.parent, `the '${L.fmt(resultType)}' result of this '??=' target`);
+      }
+      return wrap(present);
     }
-    return { kind: "block", body, loc };
+    const rhs = L.lowerExprExpecting(right, resultType);
+    const assigned = assignmentSeq(L, [], rhs, (value) => {
+      const stored = L.coerceToExpected(value, slotType);
+      if (!typeEquals(stored.type, slotType)) {
+        L.unsupported("SC1090", right, `assigning '${L.fmt(rhs.type)}' through this '??=' target`);
+      }
+      return write(stored);
+    }, loc);
+    const value: IrExpr = { kind: "nullish", left: read, right: assigned, type: resultType, loc };
+    return wrap(value);
   }
+
+/** The presence-aware read used by `??=` on an index signature. A raw
+   * recordKeyGet remains typed exactly as the index-value slot (the IR
+   * validator's invariant). When that type cannot represent a miss, a live
+   * overflow-membership probe selects between the raw read and an explicit
+   * undefined arm. Literal overflow-only keys skip declared fields; dynamic
+   * keys treat every declared name as present before consulting overflow. */
+function lowerRecordIndexNullishRead(
+  L: Lowerer,
+  obj: IrExpr,
+  shapeId: string,
+  shape: IrRecordShape,
+  key: IrExpr,
+  overflowOnly: boolean,
+  loc: SrcLoc,
+): IrExpr | null {
+  const indexValue = shape.indexValue;
+  if (!indexValue) return null;
+  const raw: IrExpr = {
+    kind: "recordKeyGet",
+    obj,
+    shapeId,
+    key,
+    ...(overflowOnly ? { overflowOnly: true as const } : {}),
+    type: indexValue,
+    loc,
+  };
+  const readType = L.withUndefinedArmOf(indexValue);
+  if (!readType) return null;
+  if (typeEquals(readType, indexValue)) return raw;
+  const presentValue = L.coerceToExpected(raw, readType);
+  const missingValue = L.wrappedUndefined(readType, loc);
+  if (!typeEquals(presentValue.type, readType) || !missingValue) return null;
+  const keysType: IrType & { kind: "array" } = { kind: "array", elem: STRING };
+  let present: IrExpr = {
+    kind: "arrIntrinsic",
+    method: "includes",
+    receiver: { kind: "recordOvfKeys", obj, shapeId, type: keysType, loc },
+    args: [key],
+    type: BOOL,
+    loc,
+  };
+  if (!overflowOnly) {
+    for (const field of shape.fields) {
+      present = {
+        kind: "logical",
+        op: "||",
+        left: { kind: "strEq", negated: false, left: key, right: { kind: "strLit", value: field.name, type: STRING, loc }, type: BOOL, loc },
+        right: present,
+        type: BOOL,
+        loc,
+      };
+    }
+  }
+  return { kind: "ternary", cond: present, then: presentValue, else_: missingValue, type: readType, loc };
+}
 
 /** `o.p ??= rhs` in statement position. Static record/class/accessor
    * targets share fieldTarget's read/write contract; a checked-dynamic
    * receiver uses dynKeyGet/dyn.keySet. Receiver, getter, and RHS follow
    * JS's evaluate-once / lazy order exactly. */
-  export function lowerNullishPropertyAssign(L: Lowerer, expr: ts.BinaryExpression): IrStmt | null {
+  function lowerNullishPropertyAssignValue(L: Lowerer, expr: ts.BinaryExpression): IrExpr | null {
     if (!ts.isPropertyAccessExpression(expr.left) || expr.left.questionDotToken) return null;
     const access = expr.left;
     const loc = locOf(expr);
@@ -6423,21 +6495,22 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         L.classes.get(stable.className)?.deferredInitFields?.has(stable.field) === true
           ? { kind: "fieldGet", obj: recvRef, className: stable.className, field: stable.field, type: stable.fieldType, loc }
           : stable.container === "recordOvf"
-            ? {
-                kind: "recordKeyGet",
-                obj: recvRef,
-                shapeId: stable.shapeId,
-                key: { kind: "strLit", value: stable.field, type: STRING, loc: locOf(access.name) },
-                overflowOnly: true,
-                type: L.withUndefinedArmOf(stable.fieldType) ?? stable.fieldType,
+            ? lowerRecordIndexNullishRead(
+                L,
+                recvRef,
+                stable.shapeId,
+                L.shapes.get(stable.shapeId)!,
+                { kind: "strLit", value: stable.field, type: STRING, loc: locOf(access.name) },
+                true,
                 loc,
-              }
+              ) ?? L.fieldGetExpr(stable, loc, access)
             : L.fieldGetExpr(stable, loc, access);
       return lowerStableNullishAssign(
         L,
         [{ kind: "varDecl", localId: recv.id, init: target.obj, loc }],
         read,
         target.fieldType,
+        L.irTypeOf(expr),
         expr.right,
         (value) => L.fieldSetStmt(stable, value, loc, access),
         loc,
@@ -6454,17 +6527,27 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       [{ kind: "varDecl", localId: recv.id, init: obj, loc }],
       read,
       DYN,
+      L.irTypeOf(expr),
       expr.right,
       (value) => ({ kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [recvRef, key, value], type: VOID, loc }, loc }),
       loc,
     );
   }
 
+export function lowerNullishPropertyAssign(L: Lowerer, expr: ts.BinaryExpression): IrStmt | null {
+  const value = lowerNullishPropertyAssignValue(L, expr);
+  return value ? { kind: "exprStmt", expr: value, loc: locOf(expr) } : null;
+}
+
+export function lowerNullishPropertyAssignExpr(L: Lowerer, expr: ts.BinaryExpression): IrExpr | null {
+  return lowerNullishPropertyAssignValue(L, expr);
+}
+
 /** `o[k] ??= rhs` in statement position for statically shaped records
    * (tuple/declared fields and sound keyed-record shapes) and checked-
    * dynamic values. Array/typed-array/island targets deliberately decline:
    * their OOB or engine semantics need a distinct reference primitive. */
-  export function lowerNullishElementAssign(L: Lowerer, expr: ts.BinaryExpression): IrStmt | null {
+  function lowerNullishElementAssignValue(L: Lowerer, expr: ts.BinaryExpression): IrExpr | null {
     if (!ts.isElementAccessExpression(expr.left) || expr.left.questionDotToken) return null;
     const target = expr.left;
     const loc = locOf(expr);
@@ -6482,6 +6565,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         [{ kind: "varDecl", localId: recv.id, init: symbolTarget.obj, loc }],
         read,
         symbolTarget.fieldType,
+        L.irTypeOf(expr),
         expr.right,
         (value) => L.fieldSetStmt(stable, value, loc, target),
         loc,
@@ -6536,6 +6620,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         prefix,
         read,
         DYN,
+        L.irTypeOf(expr),
         expr.right,
         (value) => ({ kind: "exprStmt", expr: { kind: "libCall", fn: "dyn.keySet", args: [recvRef, key, value], type: VOID, loc }, loc }),
         loc,
@@ -6557,6 +6642,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         prefix,
         read,
         field.type,
+        L.irTypeOf(expr),
         expr.right,
         (value) => ({ kind: "recordSet", obj: recvRef, shapeId: receiverIr.shapeId, field: field.name, value, loc }),
         loc,
@@ -6575,6 +6661,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
           prefix,
           read,
           field.type,
+          L.irTypeOf(expr),
           expr.right,
           (value) => ({ kind: "recordSet", obj: recvRef, shapeId: receiverIr.shapeId, field: field.name, value, loc }),
           loc,
@@ -6610,20 +6697,23 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       readType = slotType;
     }
     if (!readType || !slotType) return null;
-    const read: IrExpr = {
-      kind: "recordKeyGet",
-      obj: recvRef,
-      shapeId: receiverIr.shapeId,
-      key,
-      ...(overflowOnly ? { overflowOnly: true as const } : {}),
-      type: readType,
-      loc,
-    };
+    const read = shape.indexValue
+      ? lowerRecordIndexNullishRead(L, recvRef, receiverIr.shapeId, shape, key, overflowOnly, loc)
+      : {
+          kind: "recordKeyGet" as const,
+          obj: recvRef,
+          shapeId: receiverIr.shapeId,
+          key,
+          type: readType,
+          loc,
+        };
+    if (!read) return null;
     return lowerStableNullishAssign(
       L,
       prefix,
       read,
       slotType,
+      L.irTypeOf(expr),
       expr.right,
       (value) => ({
         kind: "recordKeySet",
@@ -6637,6 +6727,15 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
       loc,
     );
   }
+
+export function lowerNullishElementAssign(L: Lowerer, expr: ts.BinaryExpression): IrStmt | null {
+  const value = lowerNullishElementAssignValue(L, expr);
+  return value ? { kind: "exprStmt", expr: value, loc: locOf(expr) } : null;
+}
+
+export function lowerNullishElementAssignExpr(L: Lowerer, expr: ts.BinaryExpression): IrExpr | null {
+  return lowerNullishElementAssignValue(L, expr);
+}
 
 /** The builtin mutable-property slice that is not represented by a normal
    * field target. Null means the generic statement machinery should keep
@@ -7822,6 +7921,14 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
     const op = expr.operatorToken.kind;
 
     if (op === ts.SyntaxKind.EqualsToken || (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment)) {
+      if (op === ts.SyntaxKind.QuestionQuestionEqualsToken) {
+        const member = ts.isPropertyAccessExpression(expr.left)
+          ? lowerNullishPropertyAssignExpr(L, expr)
+          : ts.isElementAccessExpression(expr.left)
+            ? lowerNullishElementAssignExpr(L, expr)
+            : null;
+        if (member) return member;
+      }
       // `x = e` in EXPRESSION position (`while ((idx = s.indexOf("\n")) !== -1)`,
       // `f(x = v)`): evaluate e once, write the binding, yield the assigned
       // value — JS evaluation order. Variable targets only (locals and module

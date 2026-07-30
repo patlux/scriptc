@@ -76,6 +76,30 @@ const typedMissing: Record<string, string> = {};
 typedMissing["new"] ??= "created";
 console.log(typedMissing["new"]);
 
+// Presence, not only the index value's static type, controls the read: a
+// missing key assigns, own-present undefined assigns, and a value skips.
+// A dynamic key stays single-evaluation and record overflow insertion order
+// remains the same order Object.values observes.
+const presenceDict: Record<string, string | undefined> = {
+  presentUndefined: undefined,
+  presentValue: "kept",
+};
+let presenceKeyCalls = 0;
+function presenceKey(name: string): string {
+  presenceKeyCalls = presenceKeyCalls + 1;
+  return name;
+}
+const missingResult = presenceDict[presenceKey("missing")] ??= "made";
+const undefinedResult = presenceDict[presenceKey("presentUndefined")] ??= "filled";
+const valueResult = presenceDict[presenceKey("presentValue")] ??= "ignored";
+console.log(missingResult, undefinedResult, valueResult, presenceKeyCalls);
+console.log(Object.values(presenceDict).join("|"));
+
+const objectResultDict: Record<string, { label: string }> = {};
+const assignedObject = objectResultDict["made"] ??= { label: "owned" };
+const skippedObject = objectResultDict["made"] ??= { label: "other" };
+console.log(assignedObject.label, skippedObject.label, assignedObject === skippedObject);
+
 // Accessors prove the read/write split: getter once on both paths, setter
 // only on the nullish path.
 let accessorValue: string | undefined;
