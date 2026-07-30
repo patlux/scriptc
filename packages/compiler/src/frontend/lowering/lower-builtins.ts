@@ -26,7 +26,7 @@ import {
   fenceOrDropOptionKey,
   isChildSurfaceMember,
 } from "./surfaces.js";
-import { conditionalSpreadOf, lowerDynObjectLiteral } from "./lower-exprs.js";
+import { conditionalSpreadOf, droppableStatic, lowerDynObjectLiteral } from "./lower-exprs.js";
 import { HTTP2_CONSTANTS } from "./http2-constants.js";
 import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "./crypto-tables.js";
 import { timerStyleCallback } from "./lower-calls.js";
@@ -3928,6 +3928,119 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
    * keys()/values()/entries() lower only in a for-of head (lower-stmts
    * routes them before this table) — stored iterator objects keep the
    * drain fence. Null for non-searchParams receivers. */
+  const SP_VALUE_METHODS = new Set([
+    "append", "delete", "get", "getAll", "has", "set", "sort", "toString",
+  ]);
+
+  /** A supported URLSearchParams prototype method as an UNBOUND function
+   * value. Its ordinary call ABI stays the ambient signature; invoking it
+   * without Function.prototype.call/apply therefore always reaches the
+   * prototype method with `this === undefined` and throws ERR_INVALID_THIS.
+   * The call/apply spellings are recognized separately below and supply
+   * their explicit receiver. Iterator/forEach values remain fenced: their
+   * iterator/callback-thisArg protocols need separate representations. */
+  export function lowerSearchParamsMethodValue(L: Lowerer,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    if (access.questionDotToken) return null;
+    if (L.mapTypeOf(L.typeOf(access.expression))?.kind !== "searchParams") return null;
+    if (!L.isStdlibMember(access)) return null;
+    const method = access.name.text;
+    if (!SP_VALUE_METHODS.has(method)) return null;
+    const declared = L.mapTypeOf(L.typeOf(access));
+    if (!declared || declared.kind !== "func") {
+      L.unsupported("SC1090", access, `URLSearchParams.${method} as this function value`);
+    }
+    const owner = L.lowerExpr(access.expression);
+    return searchParamsMethodValueClosure(L, method, declared, owner, false, locOf(access));
+  }
+
+  /** `sp.method.bind(sp)`: one real bound method value. The receiver is
+   * evaluated once at bind time and captured with ordinary closure RC. */
+  export function lowerSearchParamsBindCall(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    if (access.name.text !== "bind" || !ts.isPropertyAccessExpression(access.expression)) return null;
+    const methodAccess = access.expression;
+    if (L.mapTypeOf(L.typeOf(methodAccess.expression))?.kind !== "searchParams") return null;
+    if (!SP_VALUE_METHODS.has(methodAccess.name.text) || !L.isStdlibMember(methodAccess)) return null;
+    if (call.arguments.length !== 1) {
+      L.unsupported("SC1090", call, "URLSearchParams method bind with partial arguments");
+    }
+    const receiver = L.lowerExpr(call.arguments[0]!);
+    if (receiver.type.kind !== "searchParams") {
+      L.unsupported("SC1090", call.arguments[0]!, "URLSearchParams method bind with a non-URLSearchParams receiver");
+    }
+    const declared = L.mapTypeOf(L.typeOf(methodAccess));
+    if (!declared || declared.kind !== "func") {
+      L.unsupported("SC1090", methodAccess, `URLSearchParams.${methodAccess.name.text} as this bound function value`);
+    }
+    return searchParamsMethodValueClosure(L, methodAccess.name.text, declared, receiver, true, locOf(call));
+  }
+
+  function searchParamsMethodValueClosure(L: Lowerer, method: string,
+    declared: IrType & { kind: "func" }, owner: IrExpr, bound: boolean, loc: SrcLoc,): IrExpr {
+    const key = `${bound ? "bound" : "unbound"}:${method}:${typeKey(declared)}`;
+    let fnName = L.spMethodValueFns.get(key);
+    if (!fnName) {
+      fnName = `%sp.method.${L.spMethodValueFns.size}`;
+      L.spMethodValueFns.set(key, fnName);
+      const params: IrLocal[] = declared.params.map((type, i) => ({ id: `a${i}.0`, name: `a${i}`, type, mutable: false }));
+      let body: IrStmt[];
+      let captures: IrLocal[] | undefined;
+      if (bound) {
+        captures = [{ id: "this.0", name: "this", type: SEARCH_PARAMS_T, mutable: false, boxed: true }];
+        const receiver: IrExpr = { kind: "varRef", localId: "this.0", type: SEARCH_PARAMS_T, loc };
+        const args = declared.params.map((type, i): IrExpr => ({ kind: "varRef", localId: `a${i}.0`, type, loc }));
+        const result = searchParamsMethodValueBodyIr(L, method, receiver, args, declared.ret, loc);
+        body = declared.ret.kind === "void"
+          ? [{ kind: "exprStmt", expr: result, loc }]
+          : [{ kind: "return", value: result, loc }];
+      } else {
+        const thrown = nodeThrowExpr(1, "ERR_INVALID_THIS", 'Value of "this" must be of type URLSearchParams', declared.ret, loc);
+        body = declared.ret.kind === "void"
+          ? [{ kind: "exprStmt", expr: thrown, loc }]
+          : [{ kind: "return", value: thrown, loc }];
+      }
+      L.liftedFns.push({
+        name: fnName,
+        params: params.map(({ id, name, type }) => ({ localId: id, name, type })),
+        returnType: declared.ret,
+        locals: [...params, ...(captures ?? [])],
+        ...(captures ? { captures: captures.map(({ id, name, type }) => ({ localId: id, name, type })) } : {}),
+        body,
+        loc,
+      });
+    }
+    if (bound) {
+      const temp = L.declareHiddenLocal("%spbind", SEARCH_PARAMS_T);
+      temp.boxed = true;
+      return {
+        kind: "seqExpr",
+        stmts: [{ kind: "varDecl", localId: temp.id, init: owner, loc }],
+        result: { kind: "closure", fnName, captures: [temp.id], type: declared, loc },
+        type: declared,
+        loc,
+      };
+    }
+    const value: IrExpr = { kind: "closure", fnName, captures: [], type: declared, loc };
+    if (droppableStatic(owner)) return value;
+    return { kind: "seqExpr", stmts: [{ kind: "exprStmt", expr: owner, loc }], result: value, type: declared, loc };
+  }
+
+  function searchParamsMethodValueBodyIr(L: Lowerer, method: string, receiver: IrExpr,
+    args: IrExpr[], ret: IrType, loc: SrcLoc,): IrExpr {
+    switch (method) {
+      case "get": return { kind: "libCall", fn: "sp.get", args: [receiver, args[0]!], type: ret, loc };
+      case "getAll": return { kind: "libCall", fn: "sp.getAll", args: [receiver, args[0]!], type: ret, loc };
+      case "append": return { kind: "libCall", fn: "sp.append", args: [receiver, args[0]!, args[1]!], type: VOID, loc };
+      case "set": return { kind: "libCall", fn: "sp.set", args: [receiver, args[0]!, args[1]!], type: VOID, loc };
+      case "delete": return { kind: "libCall", fn: "sp.delete", args: [receiver, args[0]!], type: VOID, loc };
+      case "has": return { kind: "libCall", fn: "sp.has", args: [receiver, args[0]!], type: BOOL, loc };
+      case "sort": return { kind: "libCall", fn: "sp.sort", args: [receiver], type: VOID, loc };
+      case "toString": return { kind: "libCall", fn: "sp.toString", args: [receiver], type: STRING, loc };
+      default: throw new Error(`lowerer bug: unsupported bound URLSearchParams method ${method}`);
+    }
+  }
+
   export function lowerSearchParamsMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (call.questionDotToken || access.questionDotToken) return null;

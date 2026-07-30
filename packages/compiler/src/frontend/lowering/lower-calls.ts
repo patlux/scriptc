@@ -5,7 +5,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
-import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
+import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, NULL_T, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import type { IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
@@ -16,8 +16,8 @@ import { ffiBindingDiag, ffiSignatureDiag, requiresDynamicDiag } from "../../dia
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import { mixinFnShapeOf } from "./lower-mixins.js";
 import { bufEncoding, dynStringReceiver, lowerArrayFromCall, lowerDynArrayFilterCall, lowerDynArrayFlatMapCall, lowerGroupByStaticCall, lowerIteratorHelperCall, lowerObjectAssignIndexShape, lowerObjectFromEntriesCall, lowerObjectIterOverIndexShape, lowerRegexMethodCall, lowerStringMethodCall, lowerTupleReadMethodCall } from "./lower-containers.js";
-import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerWatcherMethodCall } from "./lower-builtins.js";
-import { droppableStatic, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
+import { lowerChildStreamMethodCall, lowerCreateRequireCall, lowerDirentMethodCall, lowerPerfHooksCall, lowerProcStreamMethodCall, lowerReflectApplyCall, lowerSearchParamsBindCall, lowerWatcherMethodCall } from "./lower-builtins.js";
+import { droppableStatic, lowerDynObjectLiteral, lowerPromiseAllTupleCall, lowerPromiseRejectCall, probeLower, templateRawTextOf } from "./lower-exprs.js";
 import { httpClientFnBindingOf, isStreamUndefCallExpr, lowerHttpClientFnCall } from "./lower-server.js";
 import { absentIntlSegmenterGetterClass, EMITTER_API_MEMBERS, exactInstanceClassOf, findGenericMethodOn, lowerAbsentIntlSegmenterFallbackCall, lowerClassGenericMethodCall, lowerStaticMethodCall, type ClassInfo } from "./lower-classes.js";
 import { emitterRooted, lowerEmitterMethodCall } from "./lower-emitter.js";
@@ -3506,6 +3506,14 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       return islandPrimitiveExit(L, expr, result);
     }
 
+    // An extracted URLSearchParams method called without call/apply: the
+    // function is unbound, so argument expressions run and the method then
+    // throws ERR_INVALID_THIS before converting any argument values.
+    {
+      const unbound = lowerSearchParamsUnboundValueCall(L, expr, loc);
+      if (unbound) return unbound;
+    }
+
     // Builtin-module functions (fs, path, os, ...): named imports whose
     // binding resolves to a supported builtin specifier lower to `libCall`.
     // A user local shadowing an import has a different symbol and never
@@ -4111,6 +4119,10 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
         // island path (bytes never cross the boundary).
         L.lowerBytesMethodCall(expr, expr.expression) ??
         L.lowerBufferStaticCall(expr, expr.expression) ??
+        // URLSearchParams method values through call/apply/bind must claim
+        // before the generic stdlib Function.prototype member fence.
+        lowerSearchParamsMethodValueInvoke(L, expr, expr.expression) ??
+        lowerSearchParamsBindCall(L, expr, expr.expression) ??
         // URL.revokeObjectURL's zero-argument contract (the one-argument
         // form keeps the fence — createObjectURL does too).
         lowerUrlStaticCall(L, expr, expr.expression) ??
@@ -9021,44 +9033,212 @@ export function lowerFunction(L: Lowerer, decl: ts.FunctionDeclaration): IrFunct
     "forEach", "keys", "values", "entries", "toString",
   ]);
 
+  function lowerSearchParamsMethodValueInvoke(L: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    const invoke = access.name.text;
+    if (invoke !== "call" && invoke !== "apply") return null;
+    const methodRef = searchParamsMethodValueAccess(L, access.expression);
+    if (!methodRef) return null;
+    const methodAccess = methodRef.access;
+    if (L.mapTypeOf(L.typeOf(methodAccess.expression))?.kind !== "searchParams") return null;
+    if (!SP_BRAND_METHODS.has(methodAccess.name.text) || !L.isStdlibMember(methodAccess)) return null;
+    const method = methodAccess.name.text;
+    const supportedBody = method !== "forEach" && method !== "keys" && method !== "values" && method !== "entries";
+    const loc = locOf(call);
+    const thisArg = call.arguments[0];
+    const resultT = L.mapTypeOf(L.typeOf(call)) ?? VOID;
+    if (!thisArg) {
+      return nodeThrowExpr(1, "ERR_INVALID_THIS", 'Value of "this" must be of type URLSearchParams', resultT, loc);
+    }
+    const thisT = L.mapTypeOf(L.typeOf(thisArg));
+    const receiver = L.lowerExpr(thisArg);
+    if (thisT?.kind !== "searchParams" || receiver.type.kind !== "searchParams") {
+      const effects: IrStmt[] = [];
+      if (!droppableStatic(receiver)) effects.push({ kind: "exprStmt", expr: receiver, loc });
+      for (const node of call.arguments.slice(1)) {
+        let value: IrExpr;
+        if (ts.isObjectLiteralExpression(node)) value = lowerDynObjectLiteral(L, node);
+        else value = L.lowerExpr(node);
+        if (!droppableStatic(value)) effects.push({ kind: "exprStmt", expr: value, loc: locOf(node) });
+      }
+      const thrown = nodeThrowExpr(1, "ERR_INVALID_THIS", 'Value of "this" must be of type URLSearchParams', resultT, loc);
+      return effects.length === 0
+        ? thrown
+        : { kind: "seqExpr", stmts: effects, result: thrown, type: resultT, loc };
+    }
+    if (!supportedBody) {
+      L.unsupported(
+        "SC1090",
+        call,
+        `URLSearchParams.${method} method values with a valid receiver (only brand-check failures lower for this method)`,
+      );
+    }
+    if (!methodRef.direct) {
+      // Reading an extracted binding is observable before call/apply reads
+      // its receiver. Keep the read once; the method closure is immortal.
+      const read = L.lowerExpr(access.expression);
+      if (!droppableStatic(read)) {
+        L.unsupported("SC1090", access.expression, "effectful URLSearchParams method-value bindings");
+      }
+    }
+    let argNodes: readonly ts.Expression[];
+    if (invoke === "call") {
+      argNodes = call.arguments.slice(1);
+    } else {
+      const list = call.arguments[1];
+      if (!list || list.kind === ts.SyntaxKind.NullKeyword ||
+          (ts.isIdentifier(list) && list.text === "undefined")) {
+        argNodes = [];
+      } else if (ts.isArrayLiteralExpression(list) && list.elements.every((e) => !ts.isSpreadElement(e))) {
+        argNodes = list.elements;
+      } else {
+        L.unsupported(
+          "SC1090",
+          list,
+          `URLSearchParams.${method}.apply with a non-literal argument list (pass an inline array, null, or undefined)`,
+        );
+      }
+      for (const extra of call.arguments.slice(2)) {
+        const v = L.lowerExpr(extra);
+        if (!droppableStatic(v)) {
+          L.unsupported("SC1090", extra, "effectful surplus arguments to Function.prototype.apply");
+        }
+      }
+    }
+    return lowerSearchParamsMethodValueBody(L, call, method, receiver, argNodes, resultT, loc);
+  }
+
+  function lowerSearchParamsUnboundValueCall(L: Lowerer,
+    call: ts.CallExpression, loc: SrcLoc,): IrExpr | null {
+    if (!ts.isIdentifier(call.expression)) return null;
+    const methodRef = searchParamsMethodValueAccess(L, call.expression);
+    if (!methodRef || methodRef.direct) return null;
+    const methodAccess = methodRef.access;
+    if (L.mapTypeOf(L.typeOf(methodAccess.expression))?.kind !== "searchParams") return null;
+    if (!SP_BRAND_METHODS.has(methodAccess.name.text) || !L.isStdlibMember(methodAccess)) return null;
+    const effects: IrStmt[] = [];
+    const callee = L.lowerExpr(call.expression);
+    if (!droppableStatic(callee)) effects.push({ kind: "exprStmt", expr: callee, loc: locOf(call.expression) });
+    for (const node of call.arguments) {
+      const value = L.lowerExpr(node);
+      if (!droppableStatic(value)) effects.push({ kind: "exprStmt", expr: value, loc: locOf(node) });
+    }
+    const resultT = L.mapTypeOf(L.typeOf(call)) ?? VOID;
+    const thrown = nodeThrowExpr(1, "ERR_INVALID_THIS", 'Value of "this" must be of type URLSearchParams', resultT, loc);
+    return effects.length === 0
+      ? thrown
+      : { kind: "seqExpr", stmts: effects, result: thrown, type: resultT, loc };
+  }
+
+  function searchParamsMethodValueAccess(L: Lowerer,
+    node: ts.Expression,): { access: ts.PropertyAccessExpression; direct: boolean } | null {
+    if (ts.isPropertyAccessExpression(node)) return { access: node, direct: true };
+    if (!ts.isIdentifier(node)) return null;
+    const sym = L.resolveValueSymbol(node);
+    const decl = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return null;
+    let init: ts.Expression = decl.initializer;
+    while (ts.isParenthesizedExpression(init)) init = init.expression;
+    return ts.isPropertyAccessExpression(init) ? { access: init, direct: false } : null;
+  }
+
+  function lowerSearchParamsMethodValueBody(L: Lowerer, call: ts.CallExpression,
+    method: string, receiver: IrExpr, args: readonly ts.Expression[], resultT: IrType, loc: SrcLoc,): IrExpr {
+    const required: Record<string, [number, string] | undefined> = {
+      get: [1, 'The "name" argument must be specified'],
+      getAll: [1, 'The "name" argument must be specified'],
+      has: [1, 'The "name" argument must be specified'],
+      delete: [1, 'The "name" argument must be specified'],
+      append: [2, 'The "name" and "value" arguments must be specified'],
+      set: [2, 'The "name" and "value" arguments must be specified'],
+    };
+    const req = required[method];
+    if (req && args.length < req[0]) {
+      return nodeThrowExpr(1, "ERR_MISSING_ARGS", req[1], resultT, loc);
+    }
+    const strArg = (i: number): IrExpr => {
+      const node = args[i]!;
+      const t = L.mapTypeOf(L.typeOf(node));
+      if (t?.kind === "string") return L.lowerExprExpecting(node, STRING);
+      if (t?.kind === "symbol") {
+        return nodeThrowExpr(1, "", "Cannot convert a Symbol value to a string", STRING, loc);
+      }
+      let value: IrExpr;
+      if (ts.isObjectLiteralExpression(node)) {
+        value = lowerDynObjectLiteral(L, node);
+      } else {
+        const raw = L.lowerExpr(node);
+        if (raw.type.kind === "dyn") value = raw;
+        else if (raw.kind === "unitLit" || L.dynConvertible(raw.type)) {
+          value = { kind: "dynFrom", value: raw, type: DYN, loc: raw.loc };
+        } else {
+          L.noLowering(
+            `URLSearchParams.${method} method value with a '${L.fmt(raw.type)}' argument`,
+            node,
+            "string arguments are the lowered shape (other values coerce through the checked-dynamic tree)",
+          );
+        }
+      }
+      return { kind: "libCall", fn: "dyn.toStringCoerce", args: [value], type: STRING, loc };
+    };
+    const optionalValue = (): IrExpr | null => {
+      if (args.length < 2) return null;
+      const t = L.mapTypeOf(L.typeOf(args[1]!));
+      if (t?.kind === "undefinedT") return null;
+      return strArg(1);
+    };
+    let out: IrExpr;
+    switch (method) {
+      case "get": {
+        const type: IrType = { kind: "union", unionId: L.unions.intern([STRING, NULL_T]) };
+        out = { kind: "libCall", fn: "sp.get", args: [receiver, strArg(0)], type, loc };
+        break;
+      }
+      case "getAll":
+        out = { kind: "libCall", fn: "sp.getAll", args: [receiver, strArg(0)], type: arrayOf(STRING), loc };
+        break;
+      case "append":
+      case "set":
+        out = { kind: "libCall", fn: method === "append" ? "sp.append" : "sp.set", args: [receiver, strArg(0), strArg(1)], type: VOID, loc };
+        break;
+      case "delete":
+      case "has": {
+        const value = optionalValue();
+        const base = method === "delete" ? "sp.delete" : "sp.has";
+        const valued = method === "delete" ? "sp.deleteValue" : "sp.hasValue";
+        out = value === null
+          ? { kind: "libCall", fn: base, args: [receiver, strArg(0)], type: method === "delete" ? VOID : BOOL, loc }
+          : { kind: "libCall", fn: valued, args: [receiver, strArg(0), value], type: method === "delete" ? VOID : BOOL, loc };
+        break;
+      }
+      case "sort":
+        out = { kind: "libCall", fn: "sp.sort", args: [receiver], type: VOID, loc };
+        break;
+      case "toString":
+        out = { kind: "libCall", fn: "sp.toString", args: [receiver], type: STRING, loc };
+        break;
+      default:
+        L.unsupported("SC1090", call, `URLSearchParams.${method} as a callable method value`);
+    }
+    const consumed = method === "append" || method === "set" ? 2
+      : method === "sort" || method === "toString" ? 0
+      : method === "has" || method === "delete" ? Math.min(args.length, 2)
+      : 1;
+    for (const extra of args.slice(consumed)) {
+      const v = L.lowerExpr(extra);
+      if (!droppableStatic(v)) {
+        L.unsupported("SC1090", extra, "effectful surplus arguments to a URLSearchParams method value");
+      }
+    }
+    return out;
+  }
+
   export function lowerObjLitGenericMethodCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (L.chainBlocked(access, call)) return null;
     const name = access.name.text;
-    // URLSearchParams method values through Function.prototype.call/apply
-    // with a receiver that is provably NOT a URLSearchParams (the suite's
-    // `params.append.call(undefined)` probes): the WHATWG brand check
-    // throws ERR_INVALID_THIS before any argument conversion — the whole
-    // call IS that throw. A receiver that IS searchParams-typed, or one
-    // whose runtime kind is unknowable (dyn/'any'), keeps the fence.
-    if (
-      (name === "call" || name === "apply") &&
-      ts.isPropertyAccessExpression(access.expression) &&
-      L.mapTypeOf(L.typeOf(access.expression.expression))?.kind === "searchParams" &&
-      SP_BRAND_METHODS.has(access.expression.name.text) &&
-      L.isStdlibMember(access.expression)
-    ) {
-      const thisArg = call.arguments[0];
-      const thisT = thisArg ? L.mapTypeOf(L.typeOf(thisArg)) : { kind: "undefinedT" as const };
-      const provablyNot =
-        thisT !== null &&
-        thisT.kind !== "searchParams" &&
-        thisT.kind !== "dyn" &&
-        thisT.kind !== "jsval" &&
-        (!thisArg || ts.isIdentifier(thisArg) || ts.isLiteralExpression(thisArg) ||
-          thisArg.kind === ts.SyntaxKind.UndefinedKeyword ||
-          thisArg.kind === ts.SyntaxKind.NullKeyword ||
-          isUnitType(thisT));
-      if (provablyNot) {
-        return nodeThrowExpr(
-          1,
-          "ERR_INVALID_THIS",
-          'Value of "this" must be of type URLSearchParams',
-          L.mapTypeOf(L.typeOf(call)) ?? VOID,
-          locOf(call),
-        );
-      }
-    }
+    const spValueCall = lowerSearchParamsMethodValueInvoke(L, call, access);
+    if (spValueCall) return spValueCall;
     const recvT = L.typeOf(access.expression);
     const propSym = L.checker.getPropertyOfType(recvT, name);
     if (!propSym) return null;
