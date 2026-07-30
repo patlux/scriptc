@@ -47,6 +47,9 @@ Options:
                      markers). A package preflight refuses falls back to the
                      island (--dynamic) with a coverage-report note — opt-in,
                      experimental
+      --trace-extension <id>
+                     embed a validated build-known semantic extension identity
+                     in runtime-trace schema v2 (repeatable; --dynamic only)
       --provenance-sources
                      EXPERIMENTAL: compile npm dependencies from their
                      provenance-attested SOURCE (fetched at the attested
@@ -114,6 +117,7 @@ const CLI_OPTIONS = {
   dynamic: { type: "boolean", default: false },
   ffi: { type: "string" },
   "npm-static": { type: "string", multiple: true },
+  "trace-extension": { type: "string", multiple: true },
   "provenance-sources": { type: "boolean", default: false },
   lib: { type: "boolean", default: false },
   profile: { type: "string" },
@@ -151,9 +155,9 @@ async function main(): Promise<number> {
     if (inputArg) {
       fail("scriptc build --lib takes no input positional: the profile names the entry module");
     }
-    if (values.dynamic || values.backend !== undefined || values.ffi !== undefined || (values["npm-static"] ?? []).length > 0) {
+    if (values.dynamic || values.backend !== undefined || values.ffi !== undefined || (values["npm-static"] ?? []).length > 0 || (values["trace-extension"] ?? []).length > 0) {
       fail(
-        "scriptc build --lib takes no --dynamic/--backend/--npm-static/--ffi: the profile pins the emission, npm imports are judged automatically, and outbound FFI currently belongs to executable builds",
+        "scriptc build --lib takes no --dynamic/--backend/--npm-static/--ffi/--trace-extension: the profile pins the emission, npm imports are judged automatically, and outbound FFI currently belongs to executable builds",
       );
     }
     const profilePath = resolve(profileArg);
@@ -191,6 +195,7 @@ async function main(): Promise<number> {
   // switches to eligibility-based detection (mixing "auto" with names
   // is rejected — the shapes answer different questions).
   const npmStaticRaw = (values["npm-static"] ?? []).flatMap((v) => v.split(",")).map((v) => v.trim()).filter((v) => v !== "");
+  const runtimeTraceExtensions = values["trace-extension"] ?? [];
   let npmStatic: string[] | "auto" | undefined;
   if (npmStaticRaw.includes("auto")) {
     if (npmStaticRaw.length > 1) fail(`--npm-static auto cannot be combined with package names\n\n${USAGE}`);
@@ -215,6 +220,9 @@ async function main(): Promise<number> {
   }
 
   if (command === "coverage") {
+    if (runtimeTraceExtensions.length > 0) {
+      fail("--trace-extension applies only to build/run artifacts, not coverage analysis");
+    }
     const { coverage, sourceTexts } = analyze(input, {
       dynamic: values.dynamic,
       ...(npmStatic !== undefined ? { npmStatic } : {}),
@@ -231,6 +239,9 @@ async function main(): Promise<number> {
 
   const build = async (): Promise<string> => {
     if (values["from-c"]) {
+      if (runtimeTraceExtensions.length > 0) {
+        fail("--trace-extension is a TypeScript/JavaScript compiler feature and cannot be combined with --from-c");
+      }
       if (ffiProfilePath !== undefined) {
         fail("--ffi is a TypeScript/JavaScript compiler feature and cannot be combined with --from-c");
       }
@@ -246,6 +257,7 @@ async function main(): Promise<number> {
       ...(backend !== undefined ? { backend } : {}),
       ...(npmStatic !== undefined ? { npmStatic } : {}),
       ...(ffiProfilePath !== undefined ? { ffiProfilePath } : {}),
+      ...(runtimeTraceExtensions.length > 0 ? { runtimeTraceExtensions } : {}),
     });
     if (!result.ok) {
       const color = process.stderr.isTTY ?? false;

@@ -3860,12 +3860,23 @@ long scr_promise_live_count(void);
  * reentrant from engine callbacks.
  */
 #ifdef SCR_DYNAMIC
-/* Opt-in runtime-path tracing. scr_lib_init calls this under SCR_DYNAMIC so
- * island-free dynamic runs report zero QuickJS initialization/entry counts
- * without changing compiler-emitted C or LLVM. Static builds do not compile
- * this declaration or call. SCRIPTC_RUNTIME_TRACE must name an absolute path;
- * invalid/unwritable paths never change output or exit status. */
+/* Opt-in artifact-bound runtime tracing. scr_lib_init installs the path
+ * gate; compiler-emitted main then registers schema-v2 static inventory
+ * literals before any module executes. A dynamic artifact that omits that
+ * metadata writes no trace (fail closed — never a partial v1/v2 document).
+ * SCRIPTC_RUNTIME_TRACE must name an absolute path; invalid/unwritable paths
+ * never change output or exit status. */
 void scr_island_trace_install(void);
+void scr_island_trace_metadata(const char *const *npm_packages,
+                               size_t npm_package_count,
+                               const char *const *compiled_modules,
+                               size_t compiled_module_count,
+                               const char *const *compiled_extensions,
+                               size_t compiled_extension_count);
+/* Emitted at the first instruction of each compiled module's run-once init.
+ * The runtime deduplicates by canonical inventory index, so cache hits and
+ * cycles never inflate the executed inventory/count. */
+void scr_island_trace_module_executed(size_t module_index);
 /* Write the trace now (idempotent). atexit covers the normal loop-drain
  * exit; explicit process.exit(_Exit) skips atexit, so its runtime path
  * flushes through this before terminating. */

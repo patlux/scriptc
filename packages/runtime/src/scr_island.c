@@ -135,12 +135,13 @@ static const JSMallocFunctions isl_mf = {
 static JSRuntime *isl_rt = NULL;
 static JSContext *isl_ctx = NULL;
 
-/* ── opt-in runtime-path trace ────────────────────────────────────────
+/* ── opt-in artifact-bound runtime trace ─────────────────────────────
  * SCRIPTC_RUNTIME_TRACE=/absolute/path.json enables one best-effort JSON
- * snapshot at normal process teardown. scr_lib_init installs it for every
- * SCR_DYNAMIC executable; static builds neither compile nor link this unit.
- * Values are fixed counters/categories only: no source, environment value,
- * request data, or caller-provided string enters the document. */
+ * snapshot at normal process teardown. The compiler registers schema-v2
+ * inventories from emitted string literals; the runtime accepts no inventory
+ * from the environment or caller code. If registration is absent or cannot
+ * allocate its execution bitmap, flush writes NOTHING (fail closed rather
+ * than relabeling the old counter-only schema as v2). */
 typedef enum {
   ISL_ENTRY_EVAL,
   ISL_ENTRY_MODULE,
@@ -159,6 +160,15 @@ static unsigned long long isl_trace_entries[ISL_ENTRY_COUNT] = {0};
 static unsigned long long isl_trace_entry_count = 0;
 static unsigned long long isl_trace_init_count = 0;
 static bool isl_trace_quickjs_initialized = false;
+static const char *const *isl_trace_npm_packages = NULL;
+static size_t isl_trace_npm_package_count = 0;
+static const char *const *isl_trace_modules = NULL;
+static size_t isl_trace_module_count = 0;
+static const char *const *isl_trace_extensions = NULL;
+static size_t isl_trace_extension_count = 0;
+static unsigned char *isl_trace_executed_modules = NULL;
+static size_t isl_trace_executed_module_count = 0;
+static bool isl_trace_metadata_ready = false;
 
 static bool isl_trace_path_absolute(const char *path) {
 #ifdef _WIN32
@@ -173,8 +183,36 @@ static bool isl_trace_path_absolute(const char *path) {
 
 static bool isl_trace_written = false;
 
+static int isl_trace_json_string(FILE *f, const char *s) {
+  if (fputc('"', f) == EOF) return 0;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    unsigned char c = *p;
+    if (c == '"' || c == '\\') {
+      if (fputc('\\', f) == EOF || fputc(c, f) == EOF) return 0;
+    } else if (c < 0x20) {
+      if (fprintf(f, "\\u%04x", (unsigned)c) < 0) return 0;
+    } else if (fputc(c, f) == EOF) {
+      return 0;
+    }
+  }
+  return fputc('"', f) != EOF;
+}
+
+static int isl_trace_json_array(FILE *f, const char *const *items,
+                                size_t count, const unsigned char *selected) {
+  if (fputc('[', f) == EOF) return 0;
+  bool first = true;
+  for (size_t i = 0; i < count; i++) {
+    if (selected && !selected[i]) continue;
+    if (!first && fputc(',', f) == EOF) return 0;
+    if (!isl_trace_json_string(f, items[i])) return 0;
+    first = false;
+  }
+  return fputc(']', f) != EOF;
+}
+
 void scr_island_trace_flush(void) {
-  if (!isl_trace_path || isl_trace_written) return;
+  if (!isl_trace_path || isl_trace_written || !isl_trace_metadata_ready) return;
   isl_trace_written = true;
   size_t path_len = strlen(isl_trace_path);
   char *tmp = malloc(path_len + 48);
@@ -192,7 +230,7 @@ void scr_island_trace_flush(void) {
   }
   int ok = fprintf(
       f,
-      "{\"schemaVersion\":1,\"quickjsInitialized\":%s,"
+      "{\"schemaVersion\":2,\"quickjsInitialized\":%s,"
       "\"islandInitializationCount\":%llu,\"islandEntryCount\":%llu,"
       "\"entryCountsByReason\":{",
       isl_trace_quickjs_initialized ? "true" : "false",
@@ -201,7 +239,32 @@ void scr_island_trace_flush(void) {
     ok = fprintf(f, "%s\"%s\":%llu", i == 0 ? "" : ",",
                  isl_entry_reason_names[i], isl_trace_entries[i]) >= 0;
   }
-  if (ok) ok = fputs("}}\n", f) >= 0;
+  if (ok) ok = fputs("},\"npmStaticPackages\":", f) >= 0;
+  if (ok) ok = isl_trace_json_array(f, isl_trace_npm_packages,
+                                     isl_trace_npm_package_count, NULL);
+  if (ok) ok = fputs(",\"compiledStaticModules\":", f) >= 0;
+  if (ok) ok = isl_trace_json_array(f, isl_trace_modules,
+                                     isl_trace_module_count, NULL);
+  if (ok) ok = fputs(",\"executedStaticModules\":", f) >= 0;
+  if (ok) ok = isl_trace_json_array(f, isl_trace_modules,
+                                     isl_trace_module_count,
+                                     isl_trace_executed_modules);
+  if (ok) {
+    ok = fprintf(f,
+                 ",\"npmStaticPackageCount\":%zu,"
+                 "\"compiledStaticModuleCount\":%zu,"
+                 "\"executedStaticModuleCount\":%zu,"
+                 "\"compiledExtensions\":",
+                 isl_trace_npm_package_count,
+                 isl_trace_module_count,
+                 isl_trace_executed_module_count) >= 0;
+  }
+  if (ok) ok = isl_trace_json_array(f, isl_trace_extensions,
+                                     isl_trace_extension_count, NULL);
+  if (ok) {
+    ok = fprintf(f, ",\"compiledExtensionCount\":%zu}\n",
+                 isl_trace_extension_count) >= 0;
+  }
   if (fclose(f) != 0) ok = 0;
   if (!ok || rename(tmp, isl_trace_path) != 0) remove(tmp);
   free(tmp);
@@ -220,6 +283,35 @@ void scr_island_trace_install(void) {
     return;
   }
   isl_trace_path = copy;
+}
+
+void scr_island_trace_metadata(const char *const *npm_packages,
+                               size_t npm_package_count,
+                               const char *const *compiled_modules,
+                               size_t compiled_module_count,
+                               const char *const *compiled_extensions,
+                               size_t compiled_extension_count) {
+  if (!isl_trace_path || isl_trace_metadata_ready) return;
+  unsigned char *executed = NULL;
+  if (compiled_module_count > 0) {
+    executed = calloc(compiled_module_count, 1);
+    if (!executed) return;
+  }
+  isl_trace_npm_packages = npm_packages;
+  isl_trace_npm_package_count = npm_package_count;
+  isl_trace_modules = compiled_modules;
+  isl_trace_module_count = compiled_module_count;
+  isl_trace_extensions = compiled_extensions;
+  isl_trace_extension_count = compiled_extension_count;
+  isl_trace_executed_modules = executed;
+  isl_trace_metadata_ready = true;
+}
+
+void scr_island_trace_module_executed(size_t module_index) {
+  if (!isl_trace_metadata_ready || module_index >= isl_trace_module_count ||
+      isl_trace_executed_modules[module_index]) return;
+  isl_trace_executed_modules[module_index] = 1;
+  isl_trace_executed_module_count++;
 }
 
 static void isl_trace_entry(IslEntryReason reason) {

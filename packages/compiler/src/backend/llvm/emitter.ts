@@ -88,6 +88,7 @@ import {
 import { DK, LlDyn } from "./dyn.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import { LlWalkers } from "./walkers.js";
+import type { RuntimeTraceMetadata } from "../../runtime-trace.js";
 import {
   arrNewCall,
   boxAccess,
@@ -130,8 +131,8 @@ interface LlScopeEntry {
   boxed?: boolean;
 }
 
-export function emitLlvmModule(mod: IrModule): string {
-  return new LlEmitter(mod).emit();
+export function emitLlvmModule(mod: IrModule, runtimeTrace?: RuntimeTraceMetadata): string {
+  return new LlEmitter(mod, runtimeTrace).emit();
 }
 
 /** Exact double literal: LLVM's 16-digit hex form round-trips every f64
@@ -983,7 +984,15 @@ class LlEmitter {
   private readonly chainSlots = new Map<string, LlValue>();
   private logArgSlots = 0;
 
-  constructor(private readonly mod: IrModule) {
+  private readonly runtimeTraceModuleIndex = new Map<string, number>();
+
+  constructor(
+    private readonly mod: IrModule,
+    private readonly runtimeTrace?: RuntimeTraceMetadata,
+  ) {
+    runtimeTrace?.modules.forEach((module, index) => {
+      this.runtimeTraceModuleIndex.set(module.sourceFile, index);
+    });
     for (const fn of mod.functions) this.fnByName.set(fn.name, fn);
     for (const entry of mod.ffiImports ?? []) this.ffiByName.set(entry.name, entry);
     const mt = computeMayThrow(mod);
@@ -1309,6 +1318,22 @@ class LlEmitter {
       // builders stack-allocate one per recursion level (dyn.ts).
       `%ScrDynPath = type { ptr, ptr, i64 }`,
     ];
+    if (this.runtimeTrace !== undefined) {
+      const emitTraceArray = (name: string, values: readonly string[]): void => {
+        if (values.length === 0) return;
+        const refs: string[] = [];
+        values.forEach((value, index) => {
+          const bytes = Buffer.from(value, "utf8");
+          const sym = `${name}_s${index}`;
+          out.push(`@${sym} = internal constant [${bytes.length + 1} x i8] c"${llStrBytes(value)}"`);
+          refs.push(`ptr @${sym}`);
+        });
+        out.push(`@${name} = internal constant [${values.length} x ptr] [ ${refs.join(", ")} ]`, ``);
+      };
+      emitTraceArray("sc_trace_npm_packages", this.runtimeTrace.npmStaticPackages);
+      emitTraceArray("sc_trace_modules", this.runtimeTrace.modules.map((module) => module.identity));
+      emitTraceArray("sc_trace_extensions", this.runtimeTrace.extensions);
+    }
     out.push(...shapes.typeDefs);
     out.push(...classShapes.typeDefs);
     out.push(
@@ -1316,6 +1341,9 @@ class LlEmitter {
       `@scr_error_vts = external global [5 x %ScrVt]`,
       `declare void @scr_init()`,
       `declare void @scr_lib_init(i32, ptr)`,
+      ...(this.runtimeTrace !== undefined
+        ? [`declare void @scr_island_trace_metadata(ptr, i64, ptr, i64, ptr, i64)`]
+        : []),
       ...(this.mod.lib === undefined ? [`declare ptr @scr_module_url(ptr)`] : []),
     );
     for (const d of this.decls) out.push(d);
@@ -1459,6 +1487,14 @@ class LlEmitter {
       ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),
       ...(usesStream ? [`  call void @scr_stream_install()`] : []),
       `  call void @scr_lib_init(i32 %argc, ptr %argv)`,
+      ...(this.runtimeTrace !== undefined
+        ? [
+            `  call void @scr_island_trace_metadata(` +
+              `ptr ${this.runtimeTrace.npmStaticPackages.length > 0 ? "@sc_trace_npm_packages" : "null"}, i64 ${this.runtimeTrace.npmStaticPackages.length}, ` +
+              `ptr ${this.runtimeTrace.modules.length > 0 ? "@sc_trace_modules" : "null"}, i64 ${this.runtimeTrace.modules.length}, ` +
+              `ptr ${this.runtimeTrace.extensions.length > 0 ? "@sc_trace_extensions" : "null"}, i64 ${this.runtimeTrace.extensions.length})`,
+          ]
+        : []),
       `  call void @${mangleFunction(this.mod.entry)}()`,
       // Uncaught exception from top-level code: Node exits 1.
       ...(entryMayThrow
@@ -2853,6 +2889,14 @@ class LlEmitter {
     this.currentReturnType = fn.returnType;
     this.currentGenerator = fn.generator ?? null;
     this.logArgSlots = 0;
+
+    const traceModuleIndex = fn.name.startsWith("%init.")
+      ? this.runtimeTraceModuleIndex.get(fn.loc.file)
+      : undefined;
+    if (traceModuleIndex !== undefined) {
+      this.declare(`declare void @scr_island_trace_module_executed(i64)`);
+      B.line(`call void @scr_island_trace_module_executed(i64 ${traceModuleIndex})`);
+    }
 
     const paramIds = new Set(fn.params.map((p) => p.localId));
     for (const local of fn.locals) {

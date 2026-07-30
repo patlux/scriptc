@@ -31,6 +31,12 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
 
     E.line(`${E.signature(fn)} {${E.srcComment(fn.loc)}`);
     E.indent++;
+    const traceModuleIndex = fn.name.startsWith("%init.")
+      ? E.runtimeTraceModuleIndex.get(fn.loc.file)
+      : undefined;
+    if (traceModuleIndex !== undefined) {
+      E.line(`scr_island_trace_module_executed(${traceModuleIndex});`);
+    }
 
     // The pending-return slot: a `return` crossing a finally computes its
     // value FIRST (before the finally runs — snapshotting it here is what

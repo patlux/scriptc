@@ -30,6 +30,7 @@ import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
+import { buildRuntimeTraceMetadata, validateRuntimeTraceExtensions, type RuntimeTraceMetadata } from "./runtime-trace.js";
 
 export const VERSION = "0.0.1";
 
@@ -136,6 +137,10 @@ export interface CompileOptions {
    * lower to direct C ABI calls, and its archive/system-library inputs are
    * appended to the executable link. */
   ffiProfilePath?: string;
+  /** Build-known semantic extension identities for runtime trace schema v2.
+   * Validated, sorted, and embedded into native code. This is metadata about
+   * the artifact, never caller-authored trace JSON or a runtime assertion. */
+  runtimeTraceExtensions?: readonly string[];
 }
 
 export type CompileResult =
@@ -626,6 +631,18 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
 
 /** The whole pipeline: load → preflight → lower → validate → emit C → clang. */
 export async function compile(entryPath: string, opts: CompileOptions): Promise<CompileResult> {
+  const traceExtensions = validateRuntimeTraceExtensions(
+    entryPath,
+    opts.dynamic ?? false,
+    opts.runtimeTraceExtensions,
+  );
+  if ("message" in traceExtensions) {
+    return {
+      ok: false,
+      diagnostics: [{ code: "SC0002", message: traceExtensions.message, loc: traceExtensions.loc }],
+      sourceTexts: new Map(),
+    };
+  }
   let ffi: FfiProfile | null = null;
   if (opts.ffiProfilePath !== undefined) {
     const loaded = loadFfiProfile(opts.ffiProfilePath);
@@ -676,6 +693,19 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     fe.dispose();
   }
 
+  const staticPackages = fe.npmStatic
+    .filter((status) => status.status === "static")
+    .map((status) => status.package);
+  const runtimeTrace: RuntimeTraceMetadata | undefined = opts.dynamic
+    ? buildRuntimeTraceMetadata(
+        lowered.module,
+        entryPath,
+        sourceTexts,
+        staticPackages,
+        traceExtensions.extensions,
+      )
+    : undefined;
+
   await mkdir(opts.outDir, { recursive: true });
   const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
   // Both backends hang off the same in-memory IrModule (never the JSON
@@ -688,7 +718,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   let llvmRefusal: string | undefined;
   if (opts.backend !== "c") {
     try {
-      const ll = emitLlvmModule(lowered.module!);
+      const ll = emitLlvmModule(lowered.module!, runtimeTrace);
       cPath = join(opts.outDir, `${stem}.ll`);
       await writeFile(cPath, ll);
       backend = "llvm";
@@ -703,7 +733,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
   }
   if (backend === "c") {
-    await writeFile(cPath, emitModule(lowered.module!, entryText));
+    await writeFile(cPath, emitModule(lowered.module!, entryText, runtimeTrace));
   }
   // Kept-TU honesty: outDir persists across builds (the CLI's .scriptc/),
   // so a lane change would leave the PREVIOUS lane's TU beside the fresh

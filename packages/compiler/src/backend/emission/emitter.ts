@@ -60,9 +60,10 @@ import { emitAsyncScaffolding, childDataThunkFor, childExitThunkFor, childExitTh
 import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-island.js";
 import { emitFunction, emitBlock, emitStmts, emitStmt, emitTryCatch, emitSwitch, mergeBrace, emitBranchInto, emitCondition } from "./emit-stmts.js";
 import { emitExpr } from "./emit-exprs.js";
+import type { RuntimeTraceMetadata } from "../../runtime-trace.js";
 
-export function emitModule(mod: IrModule, sourceText?: string): string {
-  return new CEmitter(mod, sourceText).emit();
+export function emitModule(mod: IrModule, sourceText?: string, runtimeTrace?: RuntimeTraceMetadata): string {
+  return new CEmitter(mod, sourceText, runtimeTrace).emit();
 }
 
 // Box construction moved onto CEmitter (boxNewC method): obj-kind boxes now
@@ -322,11 +323,19 @@ export class CEmitter {
   /** Vtable slot adapters to define after the function signatures (they
    * call sc_f_* bodies): dedupe key "implClass.method". */
   readonly vtAdapters = new Map<string, { impl: ClassMeta; slot: VtSlot }>();
+  /** Compiler-owned schema-v2 inventory and the source-file → canonical
+   * inventory index used by module-init instrumentation. Absent for static
+   * and library artifacts, which never reference the trace runtime. */
+  readonly runtimeTraceModuleIndex = new Map<string, number>();
 
   constructor(
     readonly mod: IrModule,
     sourceText?: string,
+    readonly runtimeTrace?: RuntimeTraceMetadata,
   ) {
+    runtimeTrace?.modules.forEach((module, index) => {
+      this.runtimeTraceModuleIndex.set(module.sourceFile, index);
+    });
     for (const fn of mod.functions) {
       this.returnTypeByFn.set(fn.name, fn.returnType);
       this.fnByName.set(fn.name, fn);
@@ -552,6 +561,17 @@ export class CEmitter {
       `#include <stdlib.h>`,
       ``,
     ];
+    if (this.runtimeTrace !== undefined) {
+      const emitTraceArray = (name: string, values: readonly string[]): void => {
+        if (values.length === 0) return;
+        out.push(`static const char *const ${name}[${values.length}] = {`);
+        for (const value of values) out.push(`  ${cStringLiteral(Buffer.from(value, "utf8"))},`);
+        out.push(`};`, ``);
+      };
+      emitTraceArray("sc_trace_npm_packages", this.runtimeTrace.npmStaticPackages);
+      emitTraceArray("sc_trace_modules", this.runtimeTrace.modules.map((module) => module.identity));
+      emitTraceArray("sc_trace_extensions", this.runtimeTrace.extensions);
+    }
     // Struct defs render into their own buffer BEFORE the unit-instance
     // table flushes: class newFns point undefined-armed union fields at
     // interned unit instances (fields start as JS's undefined, not NULL),
@@ -786,6 +806,14 @@ export class CEmitter {
       // both dispatch through them).
       ...streamVtStampLines(this),
       `  scr_lib_init(argc, argv);`,
+      ...(this.runtimeTrace !== undefined
+        ? [
+            `  scr_island_trace_metadata(` +
+              `${this.runtimeTrace.npmStaticPackages.length > 0 ? "sc_trace_npm_packages" : "NULL"}, ${this.runtimeTrace.npmStaticPackages.length}, ` +
+              `${this.runtimeTrace.modules.length > 0 ? "sc_trace_modules" : "NULL"}, ${this.runtimeTrace.modules.length}, ` +
+              `${this.runtimeTrace.extensions.length > 0 ? "sc_trace_extensions" : "NULL"}, ${this.runtimeTrace.extensions.length});`,
+          ]
+        : []),
       // Fetch-referencing programs register the native fetch bridge before any
       // island entry (the engine's lazy boot consults it): the ONLY
       // reference to scr_fetch.c, so fetch-free builds never compile or
