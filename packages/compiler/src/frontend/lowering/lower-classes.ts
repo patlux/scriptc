@@ -9,6 +9,7 @@ import { BOOL, DYN, F64, bytesOf, IrClassDef, IrExpr, IrFunction, IrLocal, IrPar
 import { MAX_GENERIC_INSTANCES, bindingNeverReassigned, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { cjsClassExprWholeExportOf, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeTypesPath, locOf } from "../program.js";
+import { isNpmStaticClassFile } from "../npm-static.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
 import { bufEncoding, lowerMapSeedArrayNew } from "./lower-containers.js";
 import { pureReemittable } from "./lower-exprs.js";
@@ -1805,8 +1806,15 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
               `overriding the builtin Error method '${mName}'`,
             );
           }
+          const importedCompactOverride =
+            overridden !== null && overridden !== undefined &&
+            isNpmStaticClassFile(overridden.declarer.decl?.getSourceFile().fileName ?? "") &&
+            isJsSourceFile(decl.getSourceFile()) && implicitMonoFile(decl.getSourceFile()) &&
+            overridden.sig.ret.kind === "jsval" && ft.ret.kind === "jsval" &&
+            shapes.length <= overridden.sig.params.length &&
+            overridden.sig.params.slice(0, shapes.length).every((p, i) => typeEquals(p.type, shapes[i]!.type));
           if (
-            overridden &&
+            overridden && !importedCompactOverride &&
             (overridden.sig.params.length !== shapes.length ||
               !overridden.sig.params.every((p, i) => typeEquals(p.type, shapes[i]!.type)) ||
               !typeEquals(overridden.sig.ret, ft.ret))
@@ -2255,7 +2263,9 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
       // synthesized constructor forwards the same params to super).
       const ctorParams: ParamShape[] = ctor && !mixinForwarding
         ? L.paramShapes(ctor.parameters)
-        : (base?.ctorParams ?? []);
+        : base && isNpmStaticClassFile(base.decl?.getSourceFile().fileName ?? "")
+          ? []
+          : (base?.ctorParams ?? []);
 
       const info: ClassInfo = {
         def: {

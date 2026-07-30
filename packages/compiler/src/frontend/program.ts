@@ -51,7 +51,8 @@ import {
 } from "../diagnostics/diagnostic.js";
 import { isNodeModulesPath, nearestPkgJsonPath, projectDtsRuntimeSibling, resolveBareModule, resolveProjectImport, resolveRelativeModule, resolveTypeDirective, setProjectRealm } from "./resolve.js";
 import { probeNodeImportRefusal, probeNodeRequireRefusal } from "./npm.js";
-import { isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, npmStaticPackages, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
+import { scanStaticClassDeclarations, scanStaticClassExports, scanStaticClassImports } from "./npm-static-class-scan.js";
+import { admitNpmStaticClassFile, isNpmStaticClassFile, isNpmStaticPackage, npmStaticActive, npmStaticFsShadow, npmStaticPackageOfPath, npmStaticPackages, reportNpmStaticOffender, setNpmStaticPackages } from "./npm-static.js";
 import { provenanceEntryFor, provenancePaths } from "./provenance-registry.js";
 import { cjsLexerVisibleNames } from "./cjs-lexer.js";
 import {
@@ -209,6 +210,57 @@ export interface StartupCrash {
   loc: { file: string; start: number; end: number };
 }
 
+/** Concrete classes used across an opted-in package boundary. Walk only
+ * the opted-in package's own relative module graph; when one of those files
+ * extends or constructs an imported bare binding, add that dependency's
+ * runtime JS entry as a declaration root. Nothing else in that package is
+ * made static. */
+function npmStaticTransitiveClassRoots(entryPath: string): string[] {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const queue: string[] = [];
+  for (const pkg of npmStaticPackages()) {
+    const entry = resolveBareModule(entryPath, pkg, "js-only");
+    if (entry !== null && isJsSourceFileName(entry.typesFile)) queue.push(entry.typesFile);
+  }
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    const normalized = file.split("\\").join("/");
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    const source = ts.sys.readFile(file);
+    if (source === undefined) continue;
+    const scan = scanStaticClassImports(file, source);
+    for (const spec of scan.relativeDeps) {
+      const dep = resolveRelativeModule(file, spec);
+      if (dep !== null && isJsSourceFileName(dep)) queue.push(dep);
+    }
+    for (const imported of scan.demandedImports) {
+      const spec = imported.spec;
+      if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
+      const dep = resolveBareModule(file, spec, "js-only");
+      if (dep === null || !isJsSourceFileName(dep.typesFile) || isNpmStaticPackage(dep.packageName)) continue;
+      const depFile = dep.typesFile.split("\\").join("/");
+      const depSource = ts.sys.readFile(depFile);
+      if (depSource === undefined) continue;
+      const exported = scanStaticClassExports(depFile, depSource)
+        .find((candidate) => candidate.exportName === imported.exportName);
+      if (exported === undefined) continue;
+      const declarations = scanStaticClassDeclarations(depFile, depSource, new Set([exported.localName]));
+      const declarationKind = declarations.classDeclarations.includes(exported.localName)
+        ? "declaration"
+        : declarations.classExpressions.includes(exported.localName)
+          ? "expression"
+          : null;
+      if (declarationKind === null) continue;
+      const alreadyAdmitted = isNpmStaticClassFile(depFile);
+      admitNpmStaticClassFile(dep.packageName, depFile, imported.exportName, exported.localName, declarationKind);
+      if (!alreadyAdmitted) roots.push(depFile);
+    }
+  }
+  return roots;
+}
+
 function loadProgram7(host: ts.Ts7Host, entryPath: string): LoadResult & { disposeAll: () => void } {
   const config = adoptProjectConfig7(host, entryPath);
   const nodeTypes = config.configFile ? resolveNodeTypes7(entryPath) : null;
@@ -245,7 +297,7 @@ function loadProgram7(host: ts.Ts7Host, entryPath: string): LoadResult & { dispo
   const paths = provenancePaths();
   if (paths !== null) options = { ...options, paths };
   const coreRoots = [entryPath, ambientDtsPath(), nodeTypes ?? fallbackDtsPath()];
-  const program = ts.createProgram([...coreRoots, overridesDtsPath()], options, host);
+  const program = ts.createProgram([...coreRoots, ...npmStaticTransitiveClassRoots(entryPath), overridesDtsPath()], options, host);
   const entry = program.getSourceFile(entryPath);
   if (!entry) throw new Error(`could not load ${entryPath}`);
   let projectWorld: ts.Program | null = null;

@@ -61,6 +61,14 @@ import { npmPackageNameOf, registerWorkspacePackage, workspacePackageOfPath } fr
 
 let activePackages: ReadonlySet<string> = new Set();
 
+/** Individual runtime JS files admitted only as concrete class declarations
+ * for opted-in consumers. The owning package remains island-owned. */
+const transitiveClassFiles = new Set<string>();
+const transitiveClassPackages = new Set<string>();
+const transitiveClassExports = new Map<string, Set<string>>();
+const transitiveClassDeclLocals = new Map<string, Set<string>>();
+const transitiveClassExprLocals = new Map<string, Set<string>>();
+
 /** Offender records of the CURRENT load attempt: packages whose static
  * compilation the preflight had to refuse, with the first reason. The
  * frontend's fallback loop consumes these and rebuilds without them. */
@@ -76,6 +84,11 @@ export function setNpmStaticPackages(packages: Iterable<string>): void {
   rewriteCache.clear();
   untypedPkgCache.clear();
   realpathProbed.clear();
+  transitiveClassFiles.clear();
+  transitiveClassPackages.clear();
+  transitiveClassExports.clear();
+  transitiveClassDeclLocals.clear();
+  transitiveClassExprLocals.clear();
 }
 
 export function npmStaticActive(): boolean {
@@ -88,6 +101,45 @@ export function npmStaticPackages(): ReadonlySet<string> {
 
 export function isNpmStaticPackage(name: string | null): boolean {
   return name !== null && activePackages.has(name);
+}
+
+export function admitNpmStaticClassFile(
+  pkg: string,
+  path: string,
+  exportName: string,
+  localName: string,
+  declarationKind: "declaration" | "expression",
+): void {
+  const normalized = path.split("\\").join("/");
+  transitiveClassPackages.add(pkg);
+  transitiveClassFiles.add(normalized);
+  const exports = transitiveClassExports.get(pkg) ?? new Set<string>();
+  exports.add(exportName);
+  transitiveClassExports.set(pkg, exports);
+  const target = declarationKind === "declaration" ? transitiveClassDeclLocals : transitiveClassExprLocals;
+  const locals = target.get(normalized) ?? new Set<string>();
+  locals.add(localName);
+  target.set(normalized, locals);
+}
+
+export function isNpmStaticClassExport(pkg: string, exportName: string): boolean {
+  return transitiveClassExports.get(pkg)?.has(exportName) ?? false;
+}
+
+export function isNpmStaticClassDeclarationLocal(path: string, localName: string): boolean {
+  return transitiveClassDeclLocals.get(path.split("\\").join("/"))?.has(localName) ?? false;
+}
+
+export function isNpmStaticClassExpressionLocal(path: string, localName: string): boolean {
+  return transitiveClassExprLocals.get(path.split("\\").join("/"))?.has(localName) ?? false;
+}
+
+export function isNpmStaticClassFile(path: string): boolean {
+  return transitiveClassFiles.has(path.split("\\").join("/"));
+}
+
+export function isNpmStaticResolutionPackage(name: string | null): boolean {
+  return name !== null && (activePackages.has(name) || transitiveClassPackages.has(name));
 }
 
 /** The opted-in package a path belongs to, or null. Attribution uses the
@@ -149,13 +201,13 @@ function shadowTargetOf(path: string): { pkg: string; viaTypes: boolean } | null
   const idx = norm.lastIndexOf("/node_modules/");
   if (idx === -1) {
     const ws = workspacePackageOfPath(norm);
-    return ws !== null && activePackages.has(ws) ? { pkg: ws, viaTypes: false } : null;
+    return ws !== null && isNpmStaticResolutionPackage(ws) ? { pkg: ws, viaTypes: false } : null;
   }
   const rest = norm.slice(idx + "/node_modules/".length);
   const parts = rest.split("/");
   const first = parts[0] ?? "";
   const dirName = first.startsWith("@") ? `${first}/${parts[1] ?? ""}` : first;
-  if (activePackages.has(dirName)) {
+  if (isNpmStaticResolutionPackage(dirName)) {
     /* An opted-in package first seen through a node_modules path may be a
      * WORKSPACE SYMLINK whose realpath escapes node_modules — and the
      * host reads file CONTENT at realpaths, where nothing path-shaped
@@ -168,7 +220,7 @@ function shadowTargetOf(path: string): { pkg: string; viaTypes: boolean } | null
   }
   if (first === "@types") {
     const mangled = parts[1] ?? "";
-    for (const pkg of activePackages) {
+    for (const pkg of [...activePackages, ...transitiveClassPackages]) {
       if (mangledTypesName(pkg) === mangled) return { pkg, viaTypes: true };
     }
   }

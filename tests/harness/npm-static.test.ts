@@ -174,6 +174,51 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     120_000,
   );
 
+  test.for([undefined, "c"] as const)(
+    "a transitive concrete class declaration is admitted without opting in its package (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "transitive-class-cli.ts");
+      const packages = ["transitive-class-consumer"];
+      const { coverage } = analyze(entry, { npmStatic: packages });
+      expect(coverage.npmStatic).toEqual([{ package: "transitive-class-consumer", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.diagnostics).toHaveLength(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      expect(coverage.stats.statementsIsland).toBe(0);
+      const binary = await buildStatic(entry, packages, backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test("transitive class definitions are scheduled exactly once", () => {
+    const entry = join(pilotRoot, "transitive-class-cli.ts");
+    const packages = ["transitive-class-consumer"];
+    const load = loadProgram(entry, { npmStatic: packages });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder);
+      expect(lowered.diagnostics).toEqual([]);
+      const module = lowered.module;
+      expect(module).not.toBeNull();
+      if (module === null) throw new Error("transitive class fixture produced no IR module");
+      expect(validateModule(module)).toEqual([]);
+      const names = module.functions.map((fn) => fn.name);
+      const transitiveClass = module.classes.find((cls) => cls.name.includes("%cx"));
+      expect(transitiveClass).toBeDefined();
+      if (transitiveClass === undefined) throw new Error("transitive class definition was not emitted");
+      expect(names.filter((name) => name === `%${transitiveClass.name}.constructor`)).toHaveLength(1);
+      expect(names.filter((name) => name === `%${transitiveClass.name}.render`)).toHaveLength(1);
+    } finally {
+      load.dispose();
+    }
+  });
+
   test("imported compact class bases stay fully static", () => {
     const entry = join(pilotRoot, "imported-base-class-cli.ts");
     const packages = ["class-derived-static", "class-base-static"];

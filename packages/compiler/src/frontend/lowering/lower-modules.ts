@@ -6,7 +6,7 @@ import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
 import { NpmGraphBuilder, packageNameOfPath, probeNodeImportRefusal, probeNodeRequireRefusal } from "../npm.js";
-import { isNpmStaticPackage } from "../npm-static.js";
+import { isNpmStaticClassDeclarationLocal, isNpmStaticClassExport, isNpmStaticClassExpressionLocal, isNpmStaticClassFile, isNpmStaticPackage } from "../npm-static.js";
 import { isJsSourceFileName, isRelativeSpecifier } from "../shared.js";
 import { canonicalBuiltinModule, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsJsFile, isJsSourceFile, isRequireStatement, locOf, makeCycleAdmission, orderedImportsOf, resolveImport, resolveNpmImport } from "../program.js";
 import type { CycleEdge } from "../program.js";
@@ -30,6 +30,7 @@ export interface FileParts {
   sf: ts.SourceFile;
   fnDecls: ts.FunctionDeclaration[];
   classDecls: ts.ClassDeclaration[];
+  classExprDecls: ts.ClassExpression[];
   topStmts: ts.Statement[];
 }
 
@@ -39,18 +40,44 @@ export interface FileParts {
    * (tests, coverage on broken files) may arrive with an empty order — fall
    * back to the entry alone. */
   export function splitFiles(L: Lowerer): FileParts[] {
-    const files = L.moduleOrder.length > 0 ? L.moduleOrder : [L.entry];
+    const ordered = L.moduleOrder.length > 0 ? L.moduleOrder : [L.entry];
+    const declarationRoots = L.program
+      .getSourceFiles()
+      .filter((sf) => !sf.isDeclarationFile && isNpmStaticClassFile(sf.fileName));
+    const files = [...declarationRoots, ...ordered];
     return files.map((sf) => {
-      const fp: FileParts = { sf, fnDecls: [], classDecls: [], topStmts: [] };
+      const fp: FileParts = { sf, fnDecls: [], classDecls: [], classExprDecls: [], topStmts: [] };
       for (const stmt of sf.statements) {
         if (ts.isFunctionDeclaration(stmt)) fp.fnDecls.push(stmt);
-        else if (ts.isClassDeclaration(stmt)) fp.classDecls.push(stmt);
+        else if (
+          ts.isClassDeclaration(stmt) &&
+          (!isNpmStaticClassFile(sf.fileName) ||
+            (stmt.name !== undefined && isNpmStaticClassDeclarationLocal(sf.fileName, stmt.name.text)))
+        ) {
+          fp.classDecls.push(stmt);
+        }
+        else if (
+          isNpmStaticClassFile(sf.fileName) && ts.isVariableStatement(stmt) &&
+          stmt.declarationList.declarations.length === 1
+        ) {
+          const decl = stmt.declarationList.declarations[0]!;
+          if (
+            ts.isIdentifier(decl.name) && decl.initializer !== undefined &&
+            ts.isClassExpression(decl.initializer) && isNpmStaticClassExpressionLocal(sf.fileName, decl.name.text)
+          ) {
+            fp.classExprDecls.push(decl.initializer);
+          }
+        }
         // Namespaces: ambient/type-only ones are zero-runtime and skip;
         // instantiated bodies FLATTEN into this file's parts (functions/
         // classes hoist under namespace-qualified names, statements join
         // the init body in source order) — lower-namespaces.ts.
         else if (ts.isModuleDeclaration(stmt)) collectNamespaceStmt(L, stmt, fp);
-        else if (
+        else if (isNpmStaticClassFile(sf.fileName)) {
+          // Declaration roots never schedule module code. Exact imported
+          // class expressions collect on demand from consumer extends/new.
+          continue;
+        } else if (
           ts.isInterfaceDeclaration(stmt) ||
           ts.isTypeAliasDeclaration(stmt) ||
           ts.isImportDeclaration(stmt) ||
@@ -183,6 +210,16 @@ export interface FileParts {
     L.collecting = true;
     try {
       for (const fp of parts) for (const decl of fp.classDecls) L.collectClassShape(decl);
+      for (const fp of parts) {
+        for (const decl of fp.classExprDecls) {
+          const info = L.lowerClassExpressionInfo(decl);
+          const holder = decl.parent;
+          if (ts.isVariableDeclaration(holder) && ts.isIdentifier(holder.name)) {
+            const symbol = L.checker.getSymbolAtLocation(holder.name);
+            if (symbol) L.classBySymbol.set(symbol, info);
+          }
+        }
+      }
       for (const fp of parts) for (const decl of fp.fnDecls) L.collectSignature(decl);
     } finally {
       L.collecting = false;
@@ -263,7 +300,7 @@ export interface FileParts {
         // island owns nothing here, in static and --dynamic builds alike.
         if (
           npm !== null &&
-          isNpmStaticPackage(npm.packageName) &&
+          (isNpmStaticPackage(npm.packageName) || isNpmStaticClassFile(npm.typesFile)) &&
           isJsSourceFileName(npm.typesFile) &&
           L.program.getSourceFile(npm.typesFile) !== undefined
         ) {
@@ -326,6 +363,7 @@ export interface FileParts {
           loc,
         });
         const bind = (nameNode: ts.Identifier | ts.StringLiteral, exportName: string): void => {
+          if (npm !== null && isNpmStaticClassExport(npm.packageName, exportName)) return;
           let symbol = L.checker.getSymbolAtLocation(nameNode);
           if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
             symbol = L.checker.getAliasedSymbol(symbol);

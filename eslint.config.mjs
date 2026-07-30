@@ -7,6 +7,7 @@ import tseslint from "typescript-eslint";
  * a style problem. */
 const TS5_ISLANDS = [
   "packages/compiler/src/frontend/npm.ts",
+  "packages/compiler/src/frontend/npm-static-class-scan.ts",
   "packages/compiler/src/frontend/cjs-lexer.ts",
   "packages/compiler/src/frontend/lowering/lower-comptime.ts",
   "packages/compiler/src/frontend/ts7/world-check.ts",

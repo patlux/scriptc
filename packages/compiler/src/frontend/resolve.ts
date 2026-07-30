@@ -16,7 +16,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { isNpmStaticPackage, npmStaticPackageOfPath, npmStaticTransformPkgJson } from "./npm-static.js";
+import { isNpmStaticResolutionPackage, npmStaticPackageOfPath, npmStaticTransformPkgJson } from "./npm-static.js";
 import { provenanceEntryFor } from "./provenance-registry.js";
 
 function isFile(path: string): boolean {
@@ -696,7 +696,7 @@ export function resolveBareModule(
   // An opted-in --npm-static package resolves to its RUNTIME JS: the js
   // pass only, the "types" export condition dropped, the @types mangling
   // never consulted — mirroring the shadowed world the tsgo host serves.
-  const npmStatic = mode === "js-only" || (mode !== "types-only" && isNpmStaticPackage(pkgName));
+  const npmStatic = mode === "js-only" || (mode !== "types-only" && isNpmStaticResolutionPackage(pkgName));
   const conditions = npmStatic ? JS_ONLY_CONDITIONS : EXPORT_CONDITIONS;
 
   const inPackage = (nmPkgDir: string, name: string, pass: NmPass): BareResolution | null => {
