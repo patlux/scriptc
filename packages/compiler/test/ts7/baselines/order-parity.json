@@ -6641,6 +6641,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/class-value-unsupported.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/class-value-unsupported.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/class-values.ts": {
    "order": [
     "<repo>/tests/diagnostics/class-values.ts"

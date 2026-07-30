@@ -44,6 +44,15 @@ export interface FileParts {
     const declarationRoots = L.program
       .getSourceFiles()
       .filter((sf) => !sf.isDeclarationFile && isNpmStaticClassFile(sf.fileName));
+    // Declaration-only npm roots are real compiled modules too: their
+    // selected class-value globals initialize before consumers read them.
+    // Give each a distinct file qualifier/run-once guard instead of the
+    // entry's empty qualifier (which would alias both globals and init
+    // guards, skipping the root entirely at runtime). Registration stays
+    // declaration-driven; unrelated package files never enter this list.
+    declarationRoots.forEach((sf, i) => {
+      if (!L.fileTag.has(sf)) L.fileTag.set(sf, `%m${ordered.length + i}.`);
+    });
     const files = [...declarationRoots, ...ordered];
     return files.map((sf) => {
       const fp: FileParts = { sf, fnDecls: [], classDecls: [], classExprDecls: [], topStmts: [] };
@@ -1962,10 +1971,25 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
   export function buildMain(L: Lowerer): IrFunction {
     const loc: SrcLoc = { file: L.entry.fileName, start: 0, end: 0 };
     const entryInit = L.initNameOf.get(L.entry);
-    const body: IrStmt[] =
+    const entryCall: IrStmt[] =
       entryInit !== undefined
         ? [{ kind: "exprStmt", expr: { kind: "call", callee: entryInit, args: [], type: VOID, loc }, loc }]
         : [];
+    // Declaration-only npm-static roots are intentionally absent from the
+    // ordinary module graph; their selected class-expression closure is
+    // executable support for imported class declarations. Initialize them
+    // before the graph entry so live `var` class bindings hold their
+    // classRef values before any consumer constructs/aliases them.
+    const rootCalls = L.program
+      .getSourceFiles()
+      .filter((sf) => !sf.isDeclarationFile && isNpmStaticClassFile(sf.fileName))
+      .flatMap((sf): IrStmt[] => {
+        const init = L.initNameOf.get(sf);
+        return init === undefined
+          ? []
+          : [{ kind: "exprStmt", expr: { kind: "call", callee: init, args: [], type: VOID, loc }, loc }];
+      });
+    const body: IrStmt[] = [...rootCalls, ...entryCall];
     // Node's startup refusal (a resolution the graph carries that Node
     // rejects — preflight's Node-order resolution walk — or the module-
     // LINK SyntaxError of a named import of a CommonJS export its lexer

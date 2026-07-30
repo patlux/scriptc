@@ -1,0 +1,15 @@
+class-value-unsupported.ts:4:10 - error SC2001: values of type 'typeof (Anonymous class)' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+  3 | // the unsupported value must stay fenced rather than becoming dyn/jsval.
+  4 | function makeClass() {
+    |          ^~~~~~~~~
+  5 |   return class {
+
+class-value-unsupported.ts:12:30 - error SC2004: uses of 'makeClass' inherit the blocker on its declaration
+
+  11 |
+  12 | const unsupported: unknown = makeClass();
+     |                              ^~~~~~~~~
+  13 | void unsupported;
+
+  hint: the declaration of 'makeClass' did not compile — fix the diagnostic reported there and these sites clear with it

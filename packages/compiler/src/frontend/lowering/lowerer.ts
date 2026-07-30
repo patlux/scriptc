@@ -1300,6 +1300,16 @@ export class Lowerer {
       // fileTag is filled just below; the hook is only ever CALLED during
       // lowering, long after the constructor completes.
       isProgramFile: (sf) => this.fileTag.has(sf),
+      // Declaration-only npm-static roots sit outside moduleOrder but their
+      // selected class-expression closure is collected before any member
+      // type maps. Registration, not path/name shape, is the proof: a
+      // poisoned or unrelated package class has no ClassInfo and stays
+      // unmapped.
+      collectedClassValue: (decl) => {
+        if (!ts.isClassExpression(decl)) return null;
+        const info = this.exprClassInfoByNode.get(decl);
+        return info ? { kind: "classval", className: info.def.name } : null;
+      },
     };
     // --dynamic: modules reachable only through dynamic import() joined
     // moduleOrder BEFORE any pass constructed — lowerToIr runs

@@ -187,6 +187,29 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     120_000,
   );
 
+  test.for(["llvm", "c"] as const)(
+    "sibling class values survive inferred object and class fields (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "class-value-fields-cli.ts");
+      const packages = ["class-value-fields-consumer"];
+      const { coverage } = analyze(entry, { npmStatic: packages });
+      expect(coverage.npmStatic).toEqual([{ package: "class-value-fields-consumer", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.diagnostics).toHaveLength(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      expect(coverage.stats.statementsFailed).toBe(0);
+      expect(coverage.stats.statementsIsland).toBe(0);
+      const binary = await buildStatic(entry, packages, backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
   test.for([undefined, "c"] as const)(
     "an imported compact class base preserves inheritance (%s backend)",
     async (backend) => {

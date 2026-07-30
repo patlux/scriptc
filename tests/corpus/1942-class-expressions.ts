@@ -48,6 +48,39 @@ const Named = class Zed {
 };
 console.log(new Named().self(), Named.who(), Named.name);
 
+// Sibling class expressions stored in object/class fields keep their
+// concrete class-object representation. Reads preserve construction,
+// static dispatch, alias identity, and distinct nominal identities.
+const Alpha = class {
+  static tag(): string {
+    return "alpha";
+  }
+  value(): string {
+    return "A";
+  }
+};
+const Beta = class {
+  static tag(): string {
+    return "beta";
+  }
+  value(): string {
+    return "B";
+  }
+};
+class ClassShelf {
+  Alpha = Alpha;
+  Beta = Beta;
+}
+const objectShelf = { Alpha, Beta };
+const shelf = new ClassShelf();
+const AlphaAlias = shelf.Alpha;
+const BetaAlias = objectShelf.Beta;
+const DetachedAlias = new ClassShelf().Alpha;
+console.log(new AlphaAlias().value(), AlphaAlias.tag(), AlphaAlias === Alpha);
+console.log(new BetaAlias().value(), BetaAlias.tag(), BetaAlias === Beta);
+console.log(new DetachedAlias().value(), DetachedAlias === Alpha);
+console.log(shelf.Alpha === shelf.Beta, objectShelf.Alpha === objectShelf.Beta);
+
 // Nested anonymous extends chains collect recursively; instance layout and
 // initializer order are exactly the declaration story.
 let C = class extends class extends class {

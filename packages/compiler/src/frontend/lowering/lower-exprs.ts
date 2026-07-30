@@ -1059,6 +1059,17 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
           }
         }
         if (classInfo) {
+          // A declaration-only npm-static class binding is a live hoisted
+          // `var` global, not the declaration itself: its module init
+          // assigns the classRef in source order. Read that slot so an
+          // importer cannot bypass initialization (and so aliases observe
+          // the same class-object identity). Ordinary program classes have
+          // no such global and keep the direct classRef path below.
+          const classGlobal = sym ? L.globalsBySymbol.get(sym) : undefined;
+          if (classGlobal) {
+            const value: IrExpr = { kind: "varRef", localId: classGlobal.id, type: classGlobal.type, loc };
+            return L.maybeNarrow(value, expr);
+          }
           // A decorated name a replacing decorator can REBIND: the value
           // is the decoration result — the mutable classval global %init
           // assigned at the class statement (TC39's name binding), never
@@ -1899,6 +1910,28 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
             "SC1090",
             expr,
             `reading '${expr.name.text}' from a computed empty-record expression (the field is always absent — bind the value to a variable first)`,
+          );
+        }
+      }
+      // The lowered receiver is a concrete program CLASS whose checker
+      // spelling came from an imported declaration (or another erasing
+      // surface). The runtime representation is authoritative exactly as
+      // for the widened-record case above: if the collected layout owns
+      // the field, read that slot. This closes classval-bearing fields too
+      // without making arbitrary declaration-file classes representable.
+      if (recvLowered.type.kind === "object") {
+        const fieldType = L.classes.get(recvLowered.type.className)?.fields.get(expr.name.text);
+        if (fieldType) {
+          return L.maybeNarrow(
+            {
+              kind: "fieldGet",
+              obj: recvLowered,
+              className: recvLowered.type.className,
+              field: expr.name.text,
+              type: fieldType,
+              loc,
+            },
+            expr,
           );
         }
       }

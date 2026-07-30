@@ -542,6 +542,12 @@ export interface TypeMapperCtx {
    * would ICE the validator. Such instance types stay unmapped (null):
    * callers fence them like any other unsupported type. */
   isProgramFile: (sf: ts.SourceFile) => boolean;
+  /** A concrete class expression collected outside the ordinary module
+   * order (the declaration-only npm-static root lane). The type world alone
+   * cannot distinguish that admitted class from an arbitrary package class,
+   * so the Lowerer proves registration by answering its exact classval.
+   * Null preserves the fail-closed rule for uncollected/poisoned classes. */
+  collectedClassValue?: (decl: ts.ClassLikeDeclaration) => IrType | null;
 }
 
 
@@ -1119,7 +1125,11 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     !classDecl.getSourceFile().isDeclarationFile &&
     checker.getConstructSignatures(widened).length > 0
   ) {
-    if (!ctx.isProgramFile(classDecl.getSourceFile())) return null;
+    if (!ctx.isProgramFile(classDecl.getSourceFile())) {
+      const collected = ctx.collectedClassValue?.(classDecl) ?? null;
+      if (collected?.kind === "classval") return collected;
+      return null;
+    }
     // The MIXIN class node's static side (`typeof C` inside the mixin):
     // the current instantiation's classval, like the instance type above.
     {
