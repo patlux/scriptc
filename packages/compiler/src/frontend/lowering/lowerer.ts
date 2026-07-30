@@ -1737,6 +1737,72 @@ export class Lowerer {
     this.prepareModuleInits(parts);
 
     const functions: IrFunction[] = [];
+    // Emit can discover a definition edge that discovery never observed:
+    // npm-static implicit-any instances lower eagerly when a reached call
+    // site needs their inferred return, and the emit pass can materialize a
+    // new instance after the fixed reachable set was computed. If that
+    // instance calls an imported declaration, dead-strip must retain the
+    // callee too. Queue top-level declaration definitions by their stable
+    // IR names; the emitted/scheduled sets make diamonds and cycles exact-
+    // once. Ordinary definitions keep historical source order, while late
+    // definitions append only when an actually emitted body references
+    // them.
+    const definitionUnits = new Map<string, ts.FunctionDeclaration>();
+    for (const fp of parts) {
+      for (const decl of fp.fnDecls) {
+        if (!decl.body) continue;
+        const symbol = declSymbolOf(this, decl);
+        const sig = symbol ? this.fnSigsBySymbol.get(symbol) : undefined;
+        if (sig) definitionUnits.set(sig.name, decl);
+      }
+    }
+    const emittedDefinitions = new Set<string>();
+    const scheduledDefinitions = new Set<string>();
+    const definitionQueue: string[] = [];
+    const scheduleDefinitionsFrom = (root: unknown): void => {
+      if (this.reachable === null || this.remainder) return;
+      const visit = (node: unknown): void => {
+        if (node === null || typeof node !== "object") return;
+        if (Array.isArray(node)) {
+          for (const item of node) visit(item);
+          return;
+        }
+        const rec = node as Record<string, unknown>;
+        const target =
+          rec["kind"] === "call" && typeof rec["callee"] === "string"
+            ? rec["callee"]
+            : rec["kind"] === "closure" && typeof rec["fnName"] === "string"
+              ? rec["fnName"]
+              : null;
+        if (
+          target !== null && definitionUnits.has(target) &&
+          !emittedDefinitions.has(target) && !scheduledDefinitions.has(target)
+        ) {
+          scheduledDefinitions.add(target);
+          definitionQueue.push(target);
+        }
+        for (const value of Object.values(rec)) visit(value);
+      };
+      visit(root);
+    };
+    const emitDefinition = (
+      name: string,
+      decl: ts.FunctionDeclaration,
+      scanLateEdges: boolean,
+    ): void => {
+      if (emittedDefinitions.has(name)) return;
+      emittedDefinitions.add(name);
+      scheduledDefinitions.delete(name);
+      const fn = this.lowerFunction(decl);
+      if (fn) {
+        functions.push(fn);
+        // Historical-order bodies were already traversed by discovery;
+        // rescanning them would retain edges intentionally represented by
+        // intrinsics/fences instead. Only definitions reached from an
+        // emit-only eager instance need to continue the late fixpoint.
+        if (scanLateEdges) scheduleDefinitionsFrom(fn);
+      } else if (this.countsSkips()) this.stats.functionsSkipped++;
+    };
     for (const fp of parts) {
       for (const decl of fp.fnDecls) {
         // Overload signatures / ambient declarations are type-world (no
@@ -1754,9 +1820,11 @@ export class Lowerer {
         // A body nothing reaches never lowers: its constructs can't fail
         // the build and it leaves no trace in the emitted C.
         if (sig && !this.wantBody(sig.name)) continue;
-        const fn = this.lowerFunction(decl);
-        if (fn) functions.push(fn);
-        else if (this.countsSkips()) this.stats.functionsSkipped++;
+        emitDefinition(
+          sig?.name ?? this.qualify(decl.getSourceFile(), decl.name?.text ?? "%default"),
+          decl,
+          false,
+        );
       }
       for (const decl of fp.classDecls) {
         const info = this.classes.get(this.classNamer(decl));
@@ -1836,6 +1904,16 @@ export class Lowerer {
     // implicit-any instances lowered eagerly at their first call sites.
     functions.push(...this.liftedFns);
     functions.push(...this.implicitFns);
+    scheduleDefinitionsFrom([this.liftedFns, this.implicitFns]);
+    // Eager implicit instances above can enqueue ordinary declarations;
+    // lowering one late declaration can enqueue another. Drain to a fixed
+    // point. A queued declaration already emitted in historical order is a
+    // no-op, which is the diamond/cycle exact-once guard.
+    while (definitionQueue.length > 0) {
+      const name = definitionQueue.shift()!;
+      const decl = definitionUnits.get(name);
+      if (decl) emitDefinition(name, decl, true);
+    }
 
     if (this.remainder) {
       // Deferred collection diagnostics nothing flushed — declarations no

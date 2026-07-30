@@ -22,7 +22,9 @@ import { copyFileSync, cpSync, globSync, mkdirSync, mkdtempSync, readFileSync, r
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
-import { analyze, compile } from "@scriptc/compiler";
+import { analyze, compile, validateModule } from "@scriptc/compiler";
+import { checkPreflight, loadProgram } from "../../packages/compiler/src/frontend/program.js";
+import { lowerToIr } from "../../packages/compiler/src/frontend/lowering/lowerer.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
@@ -126,9 +128,14 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // Legacy session + transformMessages-style plain-key deletes, plus
     // process.env cleanup, under checked-dynamic receivers.
     ["delete-shape-static", "delete-shape-cli.ts"],
+    // Package B re-exports a reachable implicit-any helper which calls an
+    // exported declaration from package A. Emit-time instance lowering must
+    // schedule that imported definition exactly once instead of dead-
+    // stripping it and leaving an undeclared IR call.
+    ["definition-scheduling-consumer,definition-scheduling-provider", "definition-scheduling-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
-    const binary = await buildStatic(entry, [pkg]);
+    const binary = await buildStatic(entry, pkg.split(","));
     const [nodeRes, nativeRes] = await Promise.all([
       runBinary("node", [entry]),
       runBinary(binary, []),
@@ -136,6 +143,28 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
+
+  test("cross-package definition scheduling produces validator-clean exact-once IR", () => {
+    const entry = join(pilotRoot, "definition-scheduling-cli.ts");
+    const packages = ["definition-scheduling-consumer", "definition-scheduling-provider"];
+    const load = loadProgram(entry, { npmStatic: packages });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder);
+      expect(lowered.diagnostics).toEqual([]);
+      const module = lowered.module;
+      expect(module).not.toBeNull();
+      if (module === null) throw new Error("definition scheduling fixture produced no IR module");
+      expect(validateModule(module)).toEqual([]);
+      const names = module.functions.map((fn) => fn.name);
+      expect(names.filter((name) => name.endsWith(".getRegistry"))).toHaveLength(1);
+      expect(names.filter((name) => name.endsWith(".cycleA"))).toHaveLength(1);
+      expect(names.filter((name) => name.endsWith(".cycleB"))).toHaveLength(1);
+      expect(names.some((name) => name.endsWith(".unusedRegistry"))).toBe(false);
+    } finally {
+      load.dispose();
+    }
+  });
 
   test("assignment-shaped npm package is fully static with no runtime fences", () => {
     const entry = join(pilotRoot, "assignment-shape-cli.ts");
