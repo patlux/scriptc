@@ -25,6 +25,7 @@ import { lowerConsoleInspectArg, lowerFormatCall } from "./lower-inspect.js";
 import { STREAM_API_MEMBERS, lowerStreamMethodCall, lowerStreamModuleCall, lowerStreamStaticCall, streamSidesOf } from "./lower-stream.js";
 import { ambientNsRootOf, ambientUndefReadType, ambientUndefVarRootOf, ambientUndefinedFnSymbolOf, contextualUndefReadType, fenceEarlyAliasUse, fenceEarlyNsMemberRef, nsMemberIdentOf, nsPathPrefix, nsUndefRead } from "./lower-namespaces.js";
 import { declSymbolOf } from "./lower-modules.js";
+import { isVarDeclared } from "./lower-stmts.js";
 import { expandoMemberRead } from "./lower-expando.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
 
@@ -5853,11 +5854,38 @@ const inliningPredicates = new Set<ts.Symbol>();
     if (!ts.isIdentifier(e)) return null;
     const local = L.resolveLocal(e);
     if (local?.type.kind === "promise" && local.type.inner.kind === "jsval") return local.type;
+    if (local?.type.kind === "union") {
+      const declSym = L.checker.getSymbolAtLocation(e);
+      const decl = declSym ? L.checker.valueDeclarationOf(declSym) : undefined;
+      const def = L.unions.get(local.type.unionId);
+      const promiseArms = def?.arms.filter(
+        (arm): arm is IrType & { kind: "promise" } => arm.kind === "promise" && arm.inner.kind === "jsval",
+      ) ?? [];
+      if (
+        decl && ts.isVariableDeclaration(decl) && isVarDeclared(decl) &&
+        promiseArms.length === 1 && def?.arms.some((arm) => arm.kind === "undefinedT") === true
+      ) {
+        return promiseArms[0]!;
+      }
+    }
     if (local) return null;
     let sym = L.checker.getSymbolAtLocation(e);
     if (sym && sym.flags & ts.SymbolFlags.Alias) sym = L.checker.getAliasedSymbol(sym);
     const g = sym ? L.globalsBySymbol.get(sym) : undefined;
     if (g?.type.kind === "promise" && g.type.inner.kind === "jsval") return g.type;
+    if (g?.type.kind === "union") {
+      const decl = sym ? L.checker.valueDeclarationOf(sym) : undefined;
+      const def = L.unions.get(g.type.unionId);
+      const promiseArms = def?.arms.filter(
+        (arm): arm is IrType & { kind: "promise" } => arm.kind === "promise" && arm.inner.kind === "jsval",
+      ) ?? [];
+      if (
+        decl && ts.isVariableDeclaration(decl) && isVarDeclared(decl) &&
+        promiseArms.length === 1 && def?.arms.some((arm) => arm.kind === "undefinedT") === true
+      ) {
+        return promiseArms[0]!;
+      }
+    }
     return null;
   }
 
@@ -5888,7 +5916,9 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     // (importCallHandleType / the island-HANDLE var rules), so the storage
     // type is the receiver's truth. Direct `import("./m").then(...)`
     // spells the same promise with no binding at all.
-    if (!recvT && L.dynamic) recvT = islandPromiseStorageTypeOf(L, access.expression);
+    if (L.dynamic && (!recvT || recvT.kind !== "promise")) {
+      recvT = islandPromiseStorageTypeOf(L, access.expression) ?? recvT;
+    }
     if (recvT?.kind !== "promise") return null;
     if (!L.isStdlibMember(access)) return null;
     const loc = locOf(call);
@@ -5920,6 +5950,26 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     }
     // The receiver evaluates FIRST, in the enclosing function, like JS.
     let receiver = L.lowerExpr(access.expression);
+    // A hoisted var physically stores promise|undefined, but this call site
+    // is checker-narrowed to the assigned promise arm. Extract that arm
+    // before applying the ordinary promise method lowering.
+    if (receiver.type.kind === "union" && recvT.kind === "promise") {
+      const def = L.unions.get(receiver.type.unionId);
+      const arm = def?.arms.find(
+        (candidate): candidate is IrType & { kind: "promise" } => candidate.kind === "promise",
+      );
+      const tag = arm ? L.armTag(receiver.type.unionId, arm) : -1;
+      if (arm && tag >= 0) {
+        receiver = {
+          kind: "unionNarrow",
+          unionId: receiver.type.unionId,
+          tag,
+          value: receiver,
+          type: arm,
+          loc,
+        };
+      }
+    }
     // A PACKAGE-returned promise lowers as an island value (jsval): the
     // promise lives in the engine, so bridge it — a static promise the
     // engine promise settles (fulfillment = the retained handle or void,

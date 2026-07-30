@@ -2266,8 +2266,15 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     // there and model both call times.
     if (ts.isIdentifier(node)) {
       const symbol = L.checker.getSymbolAtLocation(node);
-      const decl = symbol ? L.checker.valueDeclarationOf(symbol) : undefined;
-      const declared = decl && ts.isVariableDeclaration(decl)
+      const candidate = symbol ? L.checker.valueDeclarationOf(symbol) : undefined;
+      const decl = candidate && ts.isVariableDeclaration(candidate) &&
+        (ts.getCombinedNodeFlags(candidate) & ts.NodeFlags.BlockScoped) === 0
+        ? candidate
+        : undefined;
+      // The extra declaration-type query is exclusively a var-storage
+      // bridge. Asking it for ordinary let/const unions can itself hit
+      // checker panic shapes and displace their established diagnostics.
+      const declared = decl
         ? L.mapTypeOf(decl.type ? L.checker.getTypeFromTypeNode(decl.type) : L.typeOf(decl.initializer ?? decl))
         : null;
       // Once flow has narrowed a hoisted var to its declared non-undefined

@@ -8118,6 +8118,12 @@
     "<repo>/tests/fixtures/npm/cases/package-imports/main.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/2831-var-module-class-capture.js": {
+   "order": [
+    "<repo>/tests/corpus/2831-var-module-class-capture.js"
+   ],
+   "diags": []
   }
  }
 }

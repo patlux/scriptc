@@ -804,10 +804,13 @@ export function lowerImportEquals(L: Lowerer, stmt: ts.ImportEqualsDeclaration):
       );
     }
     const loc = locOf(stmt);
+    let value: IrExpr = { kind: "varRef", localId: targetG.id, type: targetG.type, loc };
+    value = L.maybeNarrow(value, stmt.moduleReference);
+    value = L.coerceInto(stmt.moduleReference, value, aliasG.type);
     return {
       kind: "assign",
       localId: aliasG.id,
-      value: { kind: "varRef", localId: targetG.id, type: targetG.type, loc },
+      value,
       loc,
     };
   }

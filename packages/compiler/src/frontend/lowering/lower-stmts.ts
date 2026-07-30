@@ -389,23 +389,22 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     return hoistVarBinding(L, symbol, decl.name);
   }
 
-/** The `var` symbol's function-scoped binding TYPE — the declared type at
-   * the binding name, with the JS-source fallbacks every mutable binding
-   * takes (an empty-object-literal type is checked-dynamic because tsc
-   * admits ANY later assignment to it; an unmappable strict type in a JS
-   * file rides the dyn fallback). Every var slot also admits `undefined`:
-   * ECMAScript initializes the binding at function/module entry, before
-   * any declaration statement executes. Reads after an assignment narrow
-   * back through the checker's flow type; reads in the hoisting window
-   * retain the undefined arm. Null when no static type can hold either the
-   * declared value or that mandatory entry state. */
-  export function varBindingType(L: Lowerer, nameNode: ts.Identifier): IrType | null {
-    let type = L.mapTypeOf(L.typeOf(nameNode));
+/** The `var` binding's assigned-value type — the declaration type before
+   * adding the physical hoisting arm. Keeping this separate from storage is
+   * essential: declaration initializers must retain their original
+   * contextual type (not inherit synthetic `undefined`), while the slot
+   * itself still holds ECMAScript's entry value. */
+  function varAssignedType(L: Lowerer, nameNode: ts.Identifier): IrType | null {
+    const tsType = L.typeOf(nameNode);
+    let type = L.mapTypeOf(tsType);
+    if (type?.kind === "void" && isUnitOnlyTsType(tsType)) {
+      type = unitOnlyUnion(L.unions);
+    }
     if (type?.kind === "record" && isJsSourceFile(nameNode.getSourceFile())) {
       const shape = L.shapes.get(type.shapeId);
       if (shape && shape.fields.length === 0 && !shape.indexValue && !shape.tuple) type = DYN;
     }
-    if (!type) type = dynFallbackType(L, nameNode, L.typeOf(nameNode));
+    if (!type) type = dynFallbackType(L, nameNode, tsType);
     // `var p = import("./m")` in a function body: the hoisted slot holds
     // the island promise/handle — the import expression's only production
     // (lowerVarDecl's rule for block-scoped bindings).
@@ -417,8 +416,16 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
         (uncheckedOverloadHandleCall(L, nameNode.parent.initializer) ? JSVAL : null) ??
         type;
     }
-    if (!type || type.kind === "void") return null;
-    return L.withUndefinedArmOf(type);
+    return !type || type.kind === "void" ? null : type;
+  }
+
+/** The `var` symbol's function/module storage TYPE. Every slot admits
+   * `undefined`: ECMAScript initializes the binding at scope entry, before
+   * any declaration statement executes. Reads after assignment narrow back
+   * through checker flow; reads in the hoisting window retain this arm. */
+  export function varBindingType(L: Lowerer, nameNode: ts.Identifier): IrType | null {
+    const assigned = varAssignedType(L, nameNode);
+    return assigned ? L.withUndefinedArmOf(assigned) : null;
   }
 
 /** `var` declarations hoist to their FUNCTION: the binding exists across
@@ -2919,7 +2926,30 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         if (wrapped) return { kind: "assign", localId: g.id, value: wrapped, loc: locOf(decl) };
         return null;
       }
-      let init = L.lowerExpr(decl.initializer);
+      if (!isVarDeclared(decl)) {
+        const init = L.lowerExprExpecting(decl.initializer, g.type);
+        return { kind: "assign", localId: g.id, value: init, loc: locOf(decl) };
+      }
+      let init: IrExpr;
+      // A selected compact class expression was collected as a real class
+      // value even when the JS checker's constructor type is structurally
+      // unmappable. Lower that declaration assignment from ClassInfo, not
+      // through the checked-dynamic fallback (which would SC1101 the class).
+      if (ts.isIdentifier(decl.name) && ts.isClassExpression(decl.initializer)) {
+        const symbol = L.checker.getSymbolAtLocation(decl.name);
+        const info = symbol ? L.classBySymbol.get(symbol) : undefined;
+        init = info
+          ? {
+              kind: "classRef",
+              className: info.def.name,
+              type: { kind: "classval", className: info.def.name },
+              loc: locOf(decl.initializer),
+            }
+          : L.lowerExpr(decl.initializer);
+      } else {
+        const assigned = ts.isIdentifier(decl.name) ? varAssignedType(L, decl.name) : null;
+        init = L.lowerExprExpecting(decl.initializer, assigned ?? undefined);
+      }
       init = L.coerceInto(decl.initializer, init, g.type);
       return { kind: "assign", localId: g.id, value: init, loc: locOf(decl) };
     }
@@ -4461,8 +4491,25 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           };
       const concatenated: IrExpr = { kind: "strConcat", left, right: L.ensureString(rhs, expr.right), type: STRING, loc };
       value = target.type.kind === "union" ? L.coerceInto(expr, concatenated, target.type) : concatenated;
-    } else if (target.type.kind === "f64" && rhs.type.kind === "f64") {
-      value = { kind: "bin", op: compound, left: read, right: rhs, type: F64, loc };
+    } else if (
+      rhs.type.kind === "f64" &&
+      (target.type.kind === "f64" ||
+        (target.type.kind === "union" &&
+          L.unions.get(target.type.unionId)?.arms.some((a) => a.kind === "f64") === true &&
+          L.unions.get(target.type.unionId)?.arms.some((a) => a.kind === "undefinedT") === true))
+    ) {
+      const left: IrExpr = target.type.kind === "f64"
+        ? read
+        : {
+            kind: "unionNarrow",
+            unionId: target.type.unionId,
+            tag: L.armTag(target.type.unionId, F64),
+            value: read,
+            type: F64,
+            loc,
+          };
+      const computed: IrExpr = { kind: "bin", op: compound, left, right: rhs, type: F64, loc };
+      value = target.type.kind === "union" ? L.coerceInto(expr, computed, target.type) : computed;
     } else if (
       (target.type.kind === "dyn" || rhs.type.kind === "dyn") &&
       (target.type.kind === "dyn" || target.type.kind === "f64") &&

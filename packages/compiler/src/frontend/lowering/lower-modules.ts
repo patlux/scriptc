@@ -1538,6 +1538,12 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                   (uncheckedOverloadHandleCall(L, decl.initializer) ? JSVAL : null))
                 : null;
             let type = handleT ?? (isVarDeclared(decl) ? (varBindingType(L, nameNode) ?? L.badType(nameNode, L.typeOf(nameNode))) : L.irTypeOf(nameNode));
+            // The import/unchecked-overload special cases above choose the
+            // assigned VALUE representation. A var slot still adds its
+            // independent scope-entry undefined arm around that exact type.
+            if (handleT !== null && isVarDeclared(decl)) {
+              type = L.withUndefinedArmOf(type) ?? L.badType(nameNode, L.typeOf(nameNode));
+            }
             // An evolving-`any` array's DERIVED file-scope binding under
             // --dynamic (`const kept = fns.filter(...)` where `fns`
             // registered array<jsval> at its `any[]` declaration): the
