@@ -14,7 +14,7 @@ import { npmPackageRelativePathOf } from "../shared.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, nodeThrowExpr, own } from "./lowerer.js";
-import { IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead, strCharsCall } from "./lower-containers.js";
+import { immediateMapIterArrayType, IndexMergeContributor, lowerIndexMergeHelper, lowerNpmStaticSafeIndexRead, strCharsCall } from "./lower-containers.js";
 import { npmStaticPackageOfPath } from "../npm-static.js";
 import { unsupportedModuleFeatureOf } from "../shared.js";
 import { fenceEnumObjectValue, lowerEnumAccess } from "./lower-enums.js";
@@ -3625,6 +3625,15 @@ export function lowerOptionalChain(L: Lowerer, expr: ts.CallExpression | ts.Prop
     const ctxType = L.checker.getContextualType(expr);
     const tsType = ctxType ?? L.typeOf(expr);
     let mapped = expected ?? L.mapTypeOf(tsType);
+    // Shipped JS sees `[...moduleGlobalMap.values()]` as any[] even after
+    // the Map has one concrete static specialization. Recover that array
+    // element type from the sole spread projection before the generic JS
+    // dynamic-array fallback claims the literal.
+    if (expected === undefined && expr.elements.length === 1 && ts.isSpreadElement(expr.elements[0]!)) {
+      let source: ts.Expression = expr.elements[0]!.expression;
+      while (ts.isParenthesizedExpression(source)) source = source.expression;
+      if (ts.isCallExpression(source)) mapped = immediateMapIterArrayType(L, source) ?? mapped;
+    }
     // A JS literal whose OWN inferred type is never-tainted
     // (neverTaintedJsType — the evolving `const gb = []`, the mixed
     // command tuple `['pwd', []]`) carries no element information: route

@@ -5599,11 +5599,18 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         !src.expression.questionDotToken &&
         (src.expression.name.text === "keys" ||
           src.expression.name.text === "values" ||
-          src.expression.name.text === "entries") &&
-        L.isStdlibMember(src.expression)
+          src.expression.name.text === "entries")
       ) {
         const proj = src.expression.name.text as ForOfIterProjection;
-        const recv = L.mapTypeOf(L.typeOf(src.expression.expression));
+        const recvNode = src.expression.expression;
+        let recv = L.mapTypeOf(L.typeOf(recvNode));
+        let specializedMapGlobal = false;
+        if (ts.isIdentifier(recvNode)) {
+          recv = L.specializePendingJsMapGlobal(recvNode, proj, []) ?? recv;
+          const symbol = L.resolveValueSymbol(recvNode);
+          specializedMapGlobal = symbol !== null && L.implicitMapGlobalTypes.has(symbol);
+        }
+        if (!L.isStdlibMember(src.expression) && !specializedMapGlobal) recv = null;
         if (recv?.kind === "map" || recv?.kind === "set") {
           const container = L.lowerExpr(src.expression.expression);
           if (container.type.kind === "map") {

@@ -149,8 +149,9 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     ["nullish-assignment-static", "nullish-assignment-cli.ts"],
     // Shipped-JS `const values = new Map()` specializes from reached
     // implicit-any calls into one module-global Map<string, number> shared
-    // by exports and a nested scheduled callback. Mutation, order,
-    // delete/clear, identity, and teardown all stay native.
+    // by exports and a nested scheduled callback. Direct values() for-of,
+    // spread/Array.from drains, [K,V] entries, typed helper get(), mutation,
+    // order, delete/reinsert/clear, identity, and teardown all stay native.
     ["map-global-static", "map-global-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
@@ -262,6 +263,27 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.stats.statementsIsland).toBe(0);
   }, 120_000);
 
+  test.for([undefined, "c"] as const)(
+    "module-global Map iterators and typed get stay static (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "map-global-cli.ts");
+      const packages = ["map-global-static"];
+      const { coverage } = analyze(entry, { npmStatic: packages });
+      expect(coverage.diagnostics).toHaveLength(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      expect(coverage.stats.statementsFailed).toBe(0);
+      expect(coverage.stats.statementsIsland).toBe(0);
+      const binary = await buildStatic(entry, packages, backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
   test("module-global Map specialization produces validator-clean exact-once IR", () => {
     const entry = join(pilotRoot, "map-global-cli.ts");
     const packages = ["map-global-static"];
@@ -274,8 +296,8 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       expect(module).not.toBeNull();
       if (module === null) throw new Error("map-global fixture produced no IR module");
       expect(validateModule(module)).toEqual([]);
-      expect(module.globals?.filter((global) => global.name === "values")).toHaveLength(1);
-      expect(module.globals?.find((global) => global.name === "values")?.type).toEqual({
+      expect(module.globals?.filter((global) => global.name === "websocketSessionCache")).toHaveLength(1);
+      expect(module.globals?.find((global) => global.name === "websocketSessionCache")?.type).toEqual({
         kind: "map",
         key: { kind: "string" },
         value: { kind: "f64" },

@@ -2033,15 +2033,26 @@ function defaultEmptyObjectParam(
       let bound: IrType = DYN;
       const arg = call.arguments[i];
       if (arg && !ts.isSpreadElement(arg)) {
+        // Module-global npm-static Maps have a concrete IR specialization
+        // even though the shipped JS checker type remains Map<any, any>.
+        // Bind that representation directly so a helper's m.get() result
+        // remains V | undefined instead of collapsing to dyn.
+        if (ts.isIdentifier(arg)) {
+          const symbol = L.resolveValueSymbol(arg);
+          const specialized = symbol ? L.implicitMapGlobalTypes.get(symbol) : undefined;
+          if (specialized) bound = specialized;
+        }
         // The argument's own checker type, literal-widened ('add' binds
         // string) — typeOf consults the ACTIVE instance's bindings, so a
         // bound param forwarded into another implicit call transitively
         // instantiates it (this._initCommandGroup(command)).
-        const t = L.checker.getBaseTypeOfLiteralType(L.typeOf(arg));
-        const mapped = L.mapTypeOf(t);
-        if (bindableImplicitIr(mapped)) {
-          bound = mapped;
-          argTypes.set(sym, t);
+        if (bound.kind === "dyn") {
+          const t = L.checker.getBaseTypeOfLiteralType(L.typeOf(arg));
+          const mapped = L.mapTypeOf(t);
+          if (bindableImplicitIr(mapped)) {
+            bound = mapped;
+            argTypes.set(sym, t);
+          }
         }
       }
       shapes.push({ type: bound, mode: "required" });

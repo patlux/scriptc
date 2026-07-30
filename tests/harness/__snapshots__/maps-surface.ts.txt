@@ -9,21 +9,21 @@ maps-surface.ts:9:16 - error SC2020: 'new Map(entries)' is part of the standard 
 
 maps-surface.ts:13:7 - error SC2020: 'MapIterator<string>' is part of the standard library types but has no scriptc lowering yet
 
-  12 | // on the spot ([...m.keys()]); a stored iterator would need the protocol.
+  12 | // Array.from drains them on the spot; a stored iterator needs the protocol.
   13 | const ks = m.keys();
      |       ^~
   14 | const vs = m.values();
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-maps-surface.ts:13:12 - error SC2020: '.keys() outside an immediate array spread' is part of the standard library types but has no scriptc lowering yet
+maps-surface.ts:13:12 - error SC2020: '.keys() outside an immediate iterator consumer' is part of the standard library types but has no scriptc lowering yet
 
-  12 | // on the spot ([...m.keys()]); a stored iterator would need the protocol.
+  12 | // Array.from drains them on the spot; a stored iterator needs the protocol.
   13 | const ks = m.keys();
      |            ^~~~~~~~
   14 | const vs = m.values();
 
-  hint: iterator objects have no lowering — drain it into an array where it is made: [...m.keys()]
+  hint: iterator objects have no lowering — consume it directly with for-of, [...m.keys()], or Array.from(m.keys())
 
 maps-surface.ts:14:7 - error SC2020: 'MapIterator<number>' is part of the standard library types but has no scriptc lowering yet
 
@@ -34,14 +34,14 @@ maps-surface.ts:14:7 - error SC2020: 'MapIterator<number>' is part of the standa
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-maps-surface.ts:14:12 - error SC2020: '.values() outside an immediate array spread' is part of the standard library types but has no scriptc lowering yet
+maps-surface.ts:14:12 - error SC2020: '.values() outside an immediate iterator consumer' is part of the standard library types but has no scriptc lowering yet
 
   13 | const ks = m.keys();
   14 | const vs = m.values();
      |            ^~~~~~~~~~
   15 | const es = m.entries();
 
-  hint: iterator objects have no lowering — drain it into an array where it is made: [...m.values()]
+  hint: iterator objects have no lowering — consume it directly with for-of, [...m.values()], or Array.from(m.values())
 
 maps-surface.ts:15:7 - error SC2020: 'MapIterator<[string, number]>' is part of the standard library types but has no scriptc lowering yet
 
@@ -52,14 +52,14 @@ maps-surface.ts:15:7 - error SC2020: 'MapIterator<[string, number]>' is part of 
 
   hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
 
-maps-surface.ts:15:12 - error SC2020: '.entries() outside an immediate array spread' is part of the standard library types but has no scriptc lowering yet
+maps-surface.ts:15:12 - error SC2020: '.entries() outside an immediate iterator consumer' is part of the standard library types but has no scriptc lowering yet
 
   14 | const vs = m.values();
   15 | const es = m.entries();
      |            ^~~~~~~~~~~
   16 | 
 
-  hint: iterator objects have no lowering — drain it into an array where it is made: [...m.entries()]
+  hint: iterator objects have no lowering — consume it directly with for-of, [...m.entries()], or Array.from(m.entries())
 
 maps-surface.ts:20:17 - error SC1090: spreading 'Map<string, number>' into a '[string, number][]' literal (only a same-element-type array spreads) is not supported yet
 

@@ -8,8 +8,8 @@ const m = new Map<string, number>();
 // other seeds (another Map, general iterables) stay fenced.
 const seeded = new Map(m);
 
-// keys()/values()/entries() lower ONLY where an array spread drains them
-// on the spot ([...m.keys()]); a stored iterator would need the protocol.
+// keys()/values()/entries() lower only where for-of, array spread, or
+// Array.from drains them on the spot; a stored iterator needs the protocol.
 const ks = m.keys();
 const vs = m.values();
 const es = m.entries();

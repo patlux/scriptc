@@ -1876,15 +1876,26 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     // `Array.from(s)` on a STRING: the string iterator's code-point walk
     // into a fresh string[] (astral characters stay whole, where a
     // charAt/index walk would truncate the surrogate halves) — the same
-    // interned helper `[...s]` lowers through.
+    // interned helper `[...s]` lowers through. A Map iterator method made
+    // directly in this sole argument position is likewise drained on the
+    // spot: no iterator object escapes, so it can reuse the spread drain.
     if (args.length === 1 && !ts.isObjectLiteralExpression(args[0]!)) {
-      const src = L.lowerExpr(args[0]!);
+      const source = args[0]!;
+      if (
+        ts.isCallExpression(source) && source.arguments.length === 0 && !source.questionDotToken &&
+        ts.isPropertyAccessExpression(source.expression) && !source.expression.questionDotToken &&
+        MAP_ITER_METHODS.has(source.expression.name.text)
+      ) {
+        const drained = L.lowerMapMethodCall(source, source.expression);
+        if (drained?.type.kind === "array") return drained;
+      }
+      const src = L.lowerExpr(source);
       if (src.type.kind === "string") return strCharsCall(L, src, loc);
       L.noLowering(
         "Array.from with this argument shape",
         call,
-        "Array.from({ length: n }, (v, i) => ...) and Array.from(aString) are the lowered " +
-          "forms — copy arrays with [...a] and drain Map/Set iterators where they are made",
+        "Array.from({ length: n }, (v, i) => ...), Array.from(aString), and " +
+          "Array.from(m.keys()/values()/entries()) are the lowered forms — copy arrays with [...a]",
       );
     }
     const n =
@@ -2086,12 +2097,22 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     const name = access.name.text;
     if (!MAP_METHODS.has(name) && !MAP_ITER_METHODS.has(name)) return null;
     let receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+    let implicitMapReceiver = false;
     if (ts.isIdentifier(access.expression)) {
+      const symbol = L.resolveValueSymbol(access.expression);
+      const implicit = L.implicitIrTypeOfSymbol(symbol ?? undefined);
+      if (implicit?.kind === "map") {
+        receiverIr = implicit;
+        implicitMapReceiver = true;
+      }
       receiverIr = L.specializePendingJsMapGlobal(access.expression, name, call.arguments) ?? receiverIr;
     }
     if (receiverIr?.kind !== "map") return null;
     const specializedSymbol = ts.isIdentifier(access.expression) ? L.resolveValueSymbol(access.expression) : null;
-    if (!L.isStdlibMember(access) && !(specializedSymbol && L.implicitMapGlobalTypes.has(specializedSymbol))) return null;
+    if (
+      !L.isStdlibMember(access) && !implicitMapReceiver &&
+      !(specializedSymbol && L.implicitMapGlobalTypes.has(specializedSymbol))
+    ) return null;
     const loc = locOf(call);
     const receiver = L.lowerExpr(access.expression);
     // The lib's `set` returns the Map (chaining typechecks); the lowered
@@ -2147,12 +2168,14 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     return L.lowerMapForEachCall(call, receiver, receiverIr);
   }
 
-/** The iterator methods the lowering DOES cover — in exactly one context. */
+/** Map iterator projections that can be consumed without materializing an
+ * iterator object: direct for-of heads, array spread, and Array.from's sole
+ * source argument. */
 const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
 
-/** `[...m.keys()]` / `[...m.values()]` / `[...m.entries()]` — the iterator
-   * methods, lowered ONLY as the operand of a spread inside an array
-   * literal, where JS drains the iterator on the spot. The call desugars to
+/** `[...m.keys()]` / `Array.from(m.values())` — iterator methods lowered
+   * only where the surrounding syntax drains them immediately. The call
+   * desugars to
    * a direct call of a synthetic drain function whose loop walks the same
    * iteration primitives as the forEach desugar and pushes each live entry
    * into a fresh array — key, value, or `[K, V]` tuple record per method.
@@ -2168,16 +2191,19 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
     const loc = locOf(call);
     const inArraySpread =
       ts.isSpreadElement(call.parent) && ts.isArrayLiteralExpression(call.parent.parent);
-    if (!inArraySpread) {
+    const inArrayFrom =
+      ts.isCallExpression(call.parent) && call.parent.arguments.length === 1 &&
+      call.parent.arguments[0] === call && ts.isPropertyAccessExpression(call.parent.expression) &&
+      call.parent.expression.name.text === "from" &&
+      L.isStdlibGlobal(call.parent.expression.expression, "Array");
+    if (!inArraySpread && !inArrayFrom) {
       L.noLowering(
-        `.${method}() outside an immediate array spread`,
+        `.${method}() outside an immediate iterator consumer`,
         call,
-        `iterator objects have no lowering — drain it into an array where it is made: [...m.${method}()]`,
+        `iterator objects have no lowering — consume it directly with for-of, [...m.${method}()], or Array.from(m.${method}())`,
       );
     }
-    // The pushed element type. For entries the checker's own element type —
-    // the [K, V] tuple behind MapIterator<[K, V]> — carries the interned
-    // tuple shape the surrounding literal will intern too.
+    // The pushed element type comes from the receiver specialization.
     let elemT: IrType;
     let tupleT: (IrType & { kind: "record" }) | null = null;
     if (method !== "keys" && mapT.value.kind === "dyn") {
@@ -2190,19 +2216,9 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
     if (method === "keys") elemT = mapT.key;
     else if (method === "values") elemT = mapT.value;
     else {
-      const iterT = L.typeOf(call);
-      const targ = L.checker.getTypeArguments(iterT as ts.TypeReference)[0];
-      const mapped = targ ? L.mapTypeOf(targ) : null;
-      const shape = mapped?.kind === "record" ? L.shapes.get(mapped.shapeId) : null;
-      if (
-        mapped?.kind !== "record" || !shape?.tuple || shape.fields.length !== 2 ||
-        !typeEquals(shape.fields.find((f) => f.name === "0")!.type, mapT.key) ||
-        !typeEquals(shape.fields.find((f) => f.name === "1")!.type, mapT.value)
-      ) {
-        L.badType(call, L.typeOf(call)); // defensive: the lib declares [K, V]
-      }
-      tupleT = mapped as IrType & { kind: "record" }; // narrowed by the check above
-      elemT = tupleT!;
+      const entryTuple = mapEntryTupleType(L, mapT);
+      tupleT = entryTuple;
+      elemT = entryTuple;
     }
     const key = `${method}:${typeKey(mapT.key)}:${typeKey(mapT.value)}`;
     let helper = L.mapHofHelpers.get(key);
@@ -2222,6 +2238,52 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
    *   }
    *   return out;
    */
+  function mapEntryTupleType(L: Lowerer,
+    mapT: IrType & { kind: "map" },): IrType & { kind: "record" } {
+    return {
+      kind: "record",
+      shapeId: L.shapes.intern([
+        { name: "0", type: mapT.key },
+        { name: "1", type: mapT.value },
+      ], true),
+    };
+  }
+
+/** The fresh array type produced by an immediately consumed Map iterator
+   * call, or null when the expression is not a statically specialized Map
+   * projection. Used by JS array-literal inference before the spread itself
+   * lowers, because the checker still reports any[] for module-global Maps. */
+  export function immediateMapIterArrayType(L: Lowerer,
+    call: ts.CallExpression,): (IrType & { kind: "array" }) | null {
+    if (
+      call.arguments.length !== 0 || call.questionDotToken ||
+      !ts.isPropertyAccessExpression(call.expression) || call.expression.questionDotToken ||
+      !MAP_ITER_METHODS.has(call.expression.name.text)
+    ) return null;
+    const access = call.expression;
+    const method = access.name.text as "keys" | "values" | "entries";
+    let mapT = L.mapTypeOf(L.typeOf(access.expression));
+    let specialized = false;
+    if (ts.isIdentifier(access.expression)) {
+      const symbol = L.resolveValueSymbol(access.expression);
+      const implicit = L.implicitIrTypeOfSymbol(symbol ?? undefined);
+      if (implicit?.kind === "map") {
+        mapT = implicit;
+        specialized = true;
+      }
+      const global = L.specializePendingJsMapGlobal(access.expression, method, []);
+      if (global) {
+        mapT = global;
+        specialized = true;
+      }
+    }
+    if (mapT?.kind !== "map" || (!L.isStdlibMember(access) && !specialized)) return null;
+    if (method !== "keys" && mapT.value.kind === "dyn") return null;
+    const elem =
+      method === "keys" ? mapT.key : method === "values" ? mapT.value : mapEntryTupleType(L, mapT);
+    return { kind: "array", elem };
+  }
+
   function buildMapIterDrainFn(name: string,
     mapT: IrType & { kind: "map" },
     method: "keys" | "values" | "entries",
@@ -4044,19 +4106,18 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
         // checker's own element type — the [K, V] tuple for pair yields,
         // T otherwise — built/read once into a hidden per-iteration
         // local, the array for-of's exact desugar.
-        const elemT = L.mapTypeOf(L.checker.getTypeAtLocation(decl!.name));
-        if (yieldsPair) {
-          const shape = elemT?.kind === "record" ? L.shapes.get(elemT.shapeId) : null;
-          if (
-            elemT?.kind !== "record" || !shape?.tuple || shape.fields.length !== 2 ||
-            !typeEquals(shape.fields.find((f) => f.name === "0")!.type, keyT) ||
-            !typeEquals(shape.fields.find((f) => f.name === "1")!.type, secondT)
-          ) {
-            L.badType(decl!.name, L.checker.getTypeAtLocation(decl!.name)); // defensive: the lib declares [K, V]
-          }
-        } else if (!elemT || !typeEquals(elemT, singleT)) {
-          L.badType(decl!.name, L.checker.getTypeAtLocation(decl!.name)); // defensive: the lib declares T
-        }
+        // Derive the yielded type from the specialized container. This is
+        // equal to the lib's [K, V]/T for typed Maps and preserves K/V when
+        // shipped JS still exposes the iterator call as any.
+        const elemT: IrType = yieldsPair
+          ? {
+              kind: "record",
+              shapeId: L.shapes.intern([
+                { name: "0", type: keyT },
+                { name: "1", type: secondT },
+              ], true),
+            }
+          : singleT;
         const elemInit: IrExpr = yieldsPair
           ? {
               kind: "recordLit",
