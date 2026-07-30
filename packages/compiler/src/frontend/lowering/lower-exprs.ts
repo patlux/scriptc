@@ -37,7 +37,8 @@ import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./
  * backends resolve that identity below the running artifact's sibling
  * `.scriptc-modules` root. No compile/staging root reaches the binary.
  * The package prefix separates same-named files across packages, including
- * scoped names; the runtime URL bridge supplies canonical percent escaping. */
+ * scoped names; the link-gated runtime leaf supplies pathToFileURL's percent
+ * escaping without pulling the node:path or WHATWG URL implementations. */
 function staticImportMetaIdentity(sf: ts.SourceFile): string | null {
   const pkg = npmPackageNameOf(sf.fileName);
   if (pkg === null) return null;

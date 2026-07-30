@@ -19,7 +19,7 @@ import {
 import { validateSidecar } from "./library/sidecar-validate.js";
 import { entryFunctionExports, type EntryExportInfo } from "./frontend/lib-exports.js";
 import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.js";
-import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, type IrLibSection, type IrModule, type IrType, type SrcLoc } from "./ir/nodes.js";
+import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesModuleUrl, moduleUsesNet, moduleUsesNodeTest, moduleUsesPath, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesUrl, moduleUsesZlib, type IrLibSection, type IrModule, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
@@ -724,6 +724,11 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       outPath: opts.outPath,
       sanitize: opts.sanitize ?? false,
       dynamic: opts.dynamic ?? false,
+      // Relocation-safe static-package import.meta.url is a self-contained,
+      // IR-gated leaf; unrelated programs keep the old runtime closure.
+      moduleUrl: moduleUsesModuleUrl(lowered.module),
+      path: moduleUsesPath(lowered.module),
+      url: moduleUsesUrl(lowered.module),
       // The link switch for scr_regex.c + libregexp: detected on the IR, so
       // regex-free programs keep the historical (pinned) command line.
       regex: moduleUsesRegex(lowered.module),
@@ -1339,6 +1344,8 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     inspect: moduleUsesInspect(mod),
     symbol: moduleUsesSymbol(mod),
     searchParams: moduleUsesSearchParams(mod),
+    path: moduleUsesPath(mod),
+    url: moduleUsesUrl(mod),
     emitter: moduleUsesEmitter(mod),
     zlib: moduleUsesZlib(mod),
   });

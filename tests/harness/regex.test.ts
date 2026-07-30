@@ -142,6 +142,7 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     const plainC = readFileSync(plainBuild.cPath, "utf8");
     expect(plainC).not.toContain("ScrRegex");
     expect(plainC).not.toContain("scr_regex");
+    expect(plainC).not.toContain("scr_module_url");
     // The class bounds are page-granular (macOS rounds segments to 16KB,
     // so a few hundred bytes of new runtime can tip a whole page): the net
     // loop hooks, the console/process/child surface (the piped-stream

@@ -319,35 +319,6 @@ ScrStr *scr_process_exec_path(void) {
   return scr_str_retain(scr_exec_path_str);
 }
 
-#ifndef SCR_LIB
-ScrStr *scr_module_url(ScrStr *identity) {
-  ScrStr *exec_path = scr_process_exec_path();
-#ifdef _WIN32
-  ScrStr *root = scr_path_win32_dirname(exec_path);
-  ScrArr *parts = scr_arr_new(SCR_ELEM_STR, 3);
-  scr_arr_push_ref(parts, root);
-  scr_arr_push_ref(parts, scr_str_new(".scriptc-modules", 16));
-  scr_arr_push_ref(parts, scr_str_retain(identity));
-  ScrStr *path = scr_path_win32_join(parts);
-#else
-  ScrStr *root = scr_path_dirname(exec_path);
-  ScrArr *parts = scr_arr_new(SCR_ELEM_STR, 3);
-  scr_arr_push_ref(parts, root);
-  scr_arr_push_ref(parts, scr_str_new(".scriptc-modules", 16));
-  scr_arr_push_ref(parts, scr_str_retain(identity));
-  ScrStr *path = scr_path_join(parts);
-#endif
-  scr_str_release(exec_path);
-  scr_arr_release(parts);
-  ScrUrl *url = scr_url_from_path(path);
-  scr_str_release(path);
-  if (url == NULL) return NULL;
-  ScrStr *href = scr_url_href(url);
-  scr_url_release(url);
-  return href;
-}
-#endif /* !SCR_LIB */
-
 ScrStr *scr_env_get(const ScrStr *name) {
   /* ScrStr data is NUL-terminated (like the fs paths below). A fresh copy
    * per read: getenv's buffer is not ours to alias, and Node's process.env

@@ -3940,9 +3940,9 @@ export type IrExpr =
   /** Relocation-safe `import.meta.url` for a statically embedded package
    * module. `identity` is the slash-separated
    * `<package-name>/<package-relative-path>` below the artifact's sibling
-   * `.scriptc-modules` root. Backends resolve it at runtime and convert
-   * the absolute path through the URL bridge, so percent escaping follows
-   * the target runtime rather than leaking the compiler's staging root. */
+   * `.scriptc-modules` root. Backends resolve and percent-encode it through
+   * the self-contained runtime leaf, so no compiler staging root reaches the
+   * binary and moduleUrl does not pull the node:path/WHATWG URL closure. */
   | { kind: "moduleUrl"; identity: string; type: IrType; loc: SrcLoc }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.
@@ -5611,6 +5611,70 @@ export function canExitIslandToType(
     return dataArms.length === 1 && dataArms[0]!.kind === "array" && dataArms[0]!.elem.kind === "jsval";
   }
   return false;
+}
+
+/** True when the module contains a node:path call. The path algorithms are
+ * a link-gated unit; URL use separately implies them for path resolution. */
+export function moduleUsesPath(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (node.kind === "libCall" && typeof node.fn === "string" && node.fn.startsWith("path.")) {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** True when the module contains a URL value or url.* call. This gates the
+ * WHATWG URL/parser unit; its file-path bridge also pulls node:path. */
+export function moduleUsesUrl(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    const node = v as { kind?: unknown; fn?: unknown };
+    if (node.kind === "url" ||
+        (node.kind === "libCall" && typeof node.fn === "string" && node.fn.startsWith("url."))) {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
+}
+
+/** True when the module constructs a relocation-safe static-package
+ * import.meta.url. This gates the self-contained scr_module_url.c leaf;
+ * moduleUrl-free programs retain their pre-feature runtime link closure. */
+export function moduleUsesModuleUrl(mod: IrModule): boolean {
+  let found = false;
+  const visit = (v: unknown): void => {
+    if (found || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item);
+      return;
+    }
+    if ((v as { kind?: unknown }).kind === "moduleUrl") {
+      found = true;
+      return;
+    }
+    for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
+  };
+  visit(mod);
+  return found;
 }
 
 /** True when the module contains any regex construct — a regexLit /

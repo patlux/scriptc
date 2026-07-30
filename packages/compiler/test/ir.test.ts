@@ -3,7 +3,7 @@ import { validateModule } from "../src/ir/validate.js";
 import { deserializeModule, serializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
 import { recursiveImplicitInstance, type GenericInstance } from "../src/frontend/lowering/lower-calls.js";
-import { BOOL, DYN, F64, JSVAL, STRING, VOID, moduleUsesDynAsync, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
+import { BOOL, DYN, F64, JSVAL, STRING, URL_T, VOID, moduleUsesDynAsync, moduleUsesModuleUrl, moduleUsesPath, moduleUsesUrl, typeEquals, typeKey, type IrModule, type IrType } from "../src/ir/nodes.js";
 
 test("hand-built fib module validates", () => {
   expect(validateModule(fibModule)).toEqual([]);
@@ -158,6 +158,61 @@ test("recursive implicit-any instances pin the checked-dynamic call ABI", () => 
   const settled: GenericInstance = { ...inst, returnPinned: undefined, implicitState: "done" };
   recursiveImplicitInstance(settled);
   expect(settled.returnPinned).toBeUndefined();
+});
+
+test("moduleUrl alone pulls its relocation helper", () => {
+  const loc = { file: "package.js", start: 0, end: 0 };
+  const plain = structuredClone(fibModule);
+  expect(moduleUsesModuleUrl(plain)).toBe(false);
+  expect(moduleUsesPath(plain)).toBe(false);
+  expect(moduleUsesUrl(plain)).toBe(false);
+
+  plain.functions[1]!.body = [{
+    kind: "exprStmt",
+    expr: {
+      kind: "moduleUrl",
+      identity: "@scope/package/nested space/shared [x].js",
+      type: STRING,
+      loc,
+    },
+    loc,
+  }];
+  expect(moduleUsesModuleUrl(plain)).toBe(true);
+  expect(moduleUsesPath(plain)).toBe(false);
+  expect(moduleUsesUrl(plain)).toBe(false);
+});
+
+test("path and URL runtime units have independent IR gates", () => {
+  const loc = { file: "gates.ts", start: 0, end: 0 };
+  const pathMod = structuredClone(fibModule);
+  pathMod.functions[1]!.body = [{
+    kind: "exprStmt",
+    expr: {
+      kind: "libCall",
+      fn: "path.dirname",
+      args: [{ kind: "strLit", value: "/a/b", type: STRING, loc }],
+      type: STRING,
+      loc,
+    },
+    loc,
+  }];
+  expect(moduleUsesPath(pathMod)).toBe(true);
+  expect(moduleUsesUrl(pathMod)).toBe(false);
+
+  const urlMod = structuredClone(fibModule);
+  urlMod.functions[1]!.body = [{
+    kind: "exprStmt",
+    expr: {
+      kind: "libCall",
+      fn: "url.new",
+      args: [{ kind: "strLit", value: "file:///a", type: STRING, loc }],
+      type: URL_T,
+      loc,
+    },
+    loc,
+  }];
+  expect(moduleUsesPath(urlMod)).toBe(false);
+  expect(moduleUsesUrl(urlMod)).toBe(true);
 });
 
 test("typed-promise dynFrom pulls the checked-dynamic async runtime", () => {

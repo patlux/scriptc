@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const RUNTIME_SOURCES = ["scr_number.c", "scr_string.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_path.c", "scr_url.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"];
+const RUNTIME_SOURCES = ["scr_number.c", "scr_string.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"];
 
 /** The pinned quickjs-ng snapshot under packages/runtime/vendor/quickjs-ng
  * (see vendor/README.md — update both together). Keys the archive cache so
@@ -47,6 +47,16 @@ export interface CcOptions {
    * defines SCR_DYNAMIC, and links the cached libqjs.a. Off = the static
    * default, byte-identical to builds predating the flag. */
   dynamic?: boolean;
+  /** The program contains moduleUrl IR (index.ts detects it): compiles the
+   * self-contained relocation helper. Off = moduleUrl-free programs retain
+   * their pre-feature link closure and size class. */
+  moduleUrl?: boolean;
+  /** The program uses node:path, or URL/file-URL functionality that depends
+   * on its resolver. Path-free programs omit the whole algorithm unit. */
+  path?: boolean;
+  /** The program uses the URL value/file-URL bridge. URL-free programs omit
+   * its parser/object unit; moduleUrl does not need it. */
+  url?: boolean;
   /** The program contains a regex construct (index.ts detects it on the
    * IR): compiles scr_regex.c and links the vendored libregexp — as cached
    * standalone objects in static builds, from the engine archive under
@@ -735,6 +745,8 @@ export interface LibArchiveOptions {
   inspect?: boolean;
   symbol?: boolean;
   searchParams?: boolean;
+  path?: boolean;
+  url?: boolean;
   emitter?: boolean;
   zlib?: boolean;
 }
@@ -746,6 +758,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const regex = opts.regex ?? false;
   const lreObjects = regex ? await ensureLreObjects(sanitize, driver) : [];
   const zlibObjects = opts.zlib ? await ensureZlibObjects(sanitize, driver) : [];
+  const url = (opts.url ?? false) || (opts.searchParams ?? false);
+  const path = (opts.path ?? false) || url;
   const sources = [
     ...LIB_RUNTIME_SOURCES,
     // win32 targets compile the libc-shim TU into the archive (stpcpy,
@@ -761,6 +775,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.assert || regex || opts.symbol ? ["scr_assert.c"] : []),
     ...(opts.inspect ? ["scr_inspect.c"] : []),
     ...(opts.symbol ? ["scr_symbol.c"] : []),
+    ...(path ? ["scr_path.c"] : []),
+    ...(url ? ["scr_url.c"] : []),
     ...(opts.searchParams ? ["scr_url_params.c"] : []),
     ...(opts.emitter ? ["scr_events_emitter.c", "scr_dyn_handle.c"] : []),
     ...(opts.zlib ? ["scr_zlib.c"] : []),
@@ -1016,6 +1032,8 @@ export async function compileC(opts: CcOptions): Promise<void> {
   const net = (opts.net ?? false) || nativeFetch || netIsland;
   const http = (opts.http ?? false) || nativeFetch || netIsland;
   const tls = (opts.tls ?? false) || nativeFetch || netIsland;
+  const url = (opts.url ?? false) || (opts.searchParams ?? false) || dynamic || http || nativeFetch;
+  const path = (opts.path ?? false) || url;
   const driver = resolveCc();
   if (driver.target !== null) {
     // See the resolveCc block: these inputs are built on and for the HOST
@@ -1095,6 +1113,9 @@ export async function compileC(opts: CcOptions): Promise<void> {
     "-Wno-deprecated-declarations", // ucontext fibers (scr_async.c)
     "-I", rtDir,
     ...RUNTIME_SOURCES.map((f) => rt(join(rtDir, f))),
+    ...(opts.moduleUrl ? [rt(join(rtDir, "scr_module_url.c"))] : []),
+    ...(path ? [rt(join(rtDir, "scr_path.c"))] : []),
+    ...(url ? [rt(join(rtDir, "scr_url.c"))] : []),
     // win32 targets compile the libc-shim TU (stpcpy, arc4random_buf,
     // gmtime_r, strcasestr — the _WIN32 block in scr_runtime.h declares
     // them) and link advapi32 (the CSPRNG RtlGenRandom/SystemFunction036,
