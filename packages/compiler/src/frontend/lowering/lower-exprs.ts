@@ -7574,6 +7574,19 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
     }
     const inner = L.lowerExpr(expr.expression);
     if (inner.type.kind !== "dyn" && inner.type.kind !== "jsval") {
+      // A generic catalog helper commonly asserts the fresh merged record
+      // to a mapped return type (`... as ModelCatalog<TGroups, TProvider>`).
+      // The checker keeps that mapped type symbolic in the body, while the
+      // call-site instance's return slot is already concrete. Erase only
+      // record-to-record here; the enclosing return coercion still proves
+      // the exact width/layout and fences any lying assertion.
+      const assertedTs = L.checker.getTypeFromTypeNode(expr.type);
+      if (
+        L.mapTypeOf(assertedTs) === null && inner.type.kind === "record" &&
+        L.ctx.returnType.kind === "record"
+      ) {
+        return inner;
+      }
       // A STATIC value cast `as any` is the explicit island entrance.
       const targetTs0 = L.checker.getTypeFromTypeNode(expr.type);
       if (targetTs0.flags & ts.TypeFlags.Any && L.dynamic) {

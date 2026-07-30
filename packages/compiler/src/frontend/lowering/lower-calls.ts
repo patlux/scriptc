@@ -6870,6 +6870,51 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     return { kind: "call", callee: helper, args: [receiver], type: resultT, loc };
   }
 
+  /** The concrete Object.values result for a fixed record when the checker
+   * keeps the generic override symbolic (`ScriptcObjectValue<T>[]`) inside
+   * a monomorphized body. The receiver's mapped shape is already concrete,
+   * so its field-value union is exact. Flatten existing unions, canonicalize
+   * by type key, and stay inside statically representable data: dynamic,
+   * engine, Map/Set, and callable values retain their ordinary fences. */
+  function staticRecordValuesResultType(
+    L: Lowerer,
+    shape: { declaredOrder?: string[]; fields: { name: string; type: IrType }[] },
+  ): (IrType & { kind: "array" }) | null {
+    const byKey = new Map<string, IrType>();
+    const add = (type: IrType): boolean => {
+      if (type.kind === "union") {
+        const arms = L.unions.get(type.unionId)?.arms;
+        if (!arms) return false;
+        return arms.every(add);
+      }
+      if (
+        type.kind === "dyn" || type.kind === "jsval" || type.kind === "map" ||
+        type.kind === "set" || type.kind === "func" || type.kind === "classval" ||
+        type.kind === "promise" || type.kind === "generator"
+      ) {
+        return false;
+      }
+      byKey.set(typeKey(type), type);
+      return true;
+    };
+    const order = shape.declaredOrder ?? shape.fields.map((field) => field.name);
+    for (const name of order) {
+      const field = shape.fields.find((candidate) => candidate.name === name);
+      if (!field || !add(field.type)) return null;
+    }
+    const arms = [...byKey.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, type]) => type);
+    // `Object.values({})` is `never[]` in the precise override. `never`
+    // has no runtime values, so the existing f64 placeholder is exact for
+    // the necessarily-empty array and matches mapType's never stance.
+    if (arms.length === 0) return { kind: "array", elem: F64 };
+    const elem = arms.length === 1
+      ? arms[0]!
+      : { kind: "union" as const, unionId: L.unions.intern(arms) };
+    return { kind: "array", elem };
+  }
+
   /** Coerce one statically-enumerated value into Object.values/entries'
    * checker result element. This is the ordinary typed-slot conversion
    * (arm wrap, union re-tag, width copy, checked dyn edge), not a bespoke
@@ -7333,6 +7378,168 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     return helper;
   }
 
+  /** `Object.assign({}, ...Object.values(groups))` over a fixed record of
+   * fixed records. This is the generated model-catalog flattening shape:
+   * the outer values sequence and every inner own-key list are finite, so a
+   * lifted helper can build the result directly. All sources are plain data
+   * records, source fields are required (optional presence is ambiguous once
+   * aliased), target fields are covered, and each value width-lifts into its
+   * final slot. Duplicate keys select the later source; result key order is
+   * ECMAScript own-key order over first insertion (integer keys globally
+   * ascending, then strings by first appearance). Anything less exact stays
+   * on the ordinary Object.assign fence. */
+  function lowerStaticCatalogAssignSpread(L: Lowerer, call: ts.CallExpression): IrExpr | null {
+    if (call.arguments.length !== 2) return null;
+    let target = call.arguments[0]!;
+    while (ts.isParenthesizedExpression(target)) target = target.expression;
+    if (!ts.isObjectLiteralExpression(target) || target.properties.length !== 0) return null;
+    const spread = call.arguments[1]!;
+    if (!ts.isSpreadElement(spread)) return null;
+    let valuesCall = spread.expression;
+    while (ts.isParenthesizedExpression(valuesCall)) valuesCall = valuesCall.expression;
+    if (
+      !ts.isCallExpression(valuesCall) || valuesCall.questionDotToken ||
+      valuesCall.arguments.length !== 1 || ts.isSpreadElement(valuesCall.arguments[0]!) ||
+      !ts.isPropertyAccessExpression(valuesCall.expression) || valuesCall.expression.questionDotToken ||
+      valuesCall.expression.name.text !== "values" ||
+      !L.isStdlibGlobal(valuesCall.expression.expression, "Object")
+    ) {
+      return null;
+    }
+    const groupsNode = valuesCall.arguments[0]!;
+    const groupsT = L.mapTypeOf(L.typeOf(groupsNode));
+    if (groupsT?.kind !== "record") return null;
+    const groupsShape = L.shapes.get(groupsT.shapeId);
+    if (
+      !groupsShape || groupsShape.tuple || groupsShape.indexValue ||
+      shapeHasAccessorSlots(groupsShape)
+    ) {
+      return null;
+    }
+    // The generated helper asserts this call directly to its mapped return
+    // alias. That asserted type stays symbolic in the body; the
+    // monomorphic return slot is the concrete catalog record.
+    let asserted: ts.Node = call.parent;
+    while (ts.isParenthesizedExpression(asserted)) asserted = asserted.parent;
+    if (!ts.isAsExpression(asserted) && !ts.isTypeAssertion(asserted)) return null;
+    if (L.mapTypeOf(L.checker.getTypeFromTypeNode(asserted.type)) !== null) return null;
+    const resultT = L.ctx.returnType;
+    if (resultT.kind !== "record") return null;
+    const resultShape = L.shapes.get(resultT.shapeId);
+    if (
+      !resultShape || resultShape.tuple || resultShape.indexValue ||
+      shapeHasAccessorSlots(resultShape)
+    ) {
+      return null;
+    }
+    type Candidate = {
+      outer: { name: string; type: IrType & { kind: "record" } };
+      inner: { name: string; type: IrType };
+      lift: WidthLift;
+    };
+    const chosen = new Map<string, Candidate>();
+    const firstSeen: string[] = [];
+    const outerOrder = groupsShape.declaredOrder ?? groupsShape.fields.map((field) => field.name);
+    for (const outerName of outerOrder) {
+      const outerField = groupsShape.fields.find((field) => field.name === outerName);
+      if (!outerField || outerField.type.kind !== "record") return null;
+      const sourceShape = L.shapes.get(outerField.type.shapeId);
+      if (
+        !sourceShape || sourceShape.tuple || sourceShape.indexValue ||
+        shapeHasAccessorSlots(sourceShape)
+      ) {
+        return null;
+      }
+      const innerOrder = sourceShape.declaredOrder ?? sourceShape.fields.map((field) => field.name);
+      for (const innerName of innerOrder) {
+        const sourceField = sourceShape.fields.find((field) => field.name === innerName);
+        const targetField = resultShape.fields.find((field) => field.name === innerName);
+        if (!sourceField || !targetField || innerName.startsWith("%")) return null;
+        // An aliased undefined arm cannot distinguish absent from
+        // own-present-undefined. Keep that presence-sensitive case fenced.
+        if (sourceField.type.kind === "union" && L.armTag(sourceField.type.unionId, UNDEFINED_T) >= 0) {
+          return null;
+        }
+        const lift = L.widthLiftPlan(sourceField.type, targetField.type);
+        if (!lift) return null;
+        if (!chosen.has(innerName)) firstSeen.push(innerName);
+        chosen.set(innerName, {
+          outer: { name: outerName, type: outerField.type },
+          inner: { name: innerName, type: sourceField.type },
+          lift,
+        });
+      }
+    }
+    if (chosen.size !== resultShape.fields.length || resultShape.fields.some((field) => !chosen.has(field.name))) {
+      return null;
+    }
+    const arrayIndex = (name: string): number | null => {
+      if (!/^(0|[1-9][0-9]{0,9})$/.test(name)) return null;
+      const value = Number(name);
+      return value <= 4294967294 ? value : null;
+    };
+    const expectedOrder = [
+      ...firstSeen
+        .flatMap((name) => {
+          const index = arrayIndex(name);
+          return index === null ? [] : [{ name, index }];
+        })
+        .sort((left, right) => left.index - right.index)
+        .map(({ name }) => name),
+      ...firstSeen.filter((name) => arrayIndex(name) === null),
+    ];
+    const actualOrder = resultShape.declaredOrder ?? resultShape.fields.map((field) => field.name);
+    if (actualOrder.length !== expectedOrder.length || actualOrder.some((name, i) => name !== expectedOrder[i])) {
+      return null;
+    }
+    const loc = locOf(call);
+    const key = `obj.assign.catalog:${groupsT.shapeId}:${resultT.shapeId}`;
+    let helper = L.arrHofHelpers.get(key);
+    if (!helper) {
+      helper = `%obj.assign.catalog.${L.arrHofHelpers.size}`;
+      L.arrHofHelpers.set(key, helper);
+      const groupsRef: IrExpr = { kind: "varRef", localId: "g.0", type: groupsT, loc };
+      const fields = resultShape.fields.map((targetField) => {
+        const candidate = chosen.get(targetField.name)!;
+        const sourceRecord: IrExpr = {
+          kind: "recordGet",
+          obj: groupsRef,
+          shapeId: groupsT.shapeId,
+          field: candidate.outer.name,
+          type: candidate.outer.type,
+          loc,
+        };
+        const raw: IrExpr = {
+          kind: "recordGet",
+          obj: sourceRecord,
+          shapeId: candidate.outer.type.shapeId,
+          field: candidate.inner.name,
+          type: candidate.inner.type,
+          loc,
+        };
+        return {
+          name: targetField.name,
+          value: L.applyWidthLift(candidate.lift, raw, targetField.type, loc),
+        };
+      });
+      L.liftedFns.push({
+        name: helper,
+        params: [{ localId: "g.0", name: "groups", type: groupsT }],
+        returnType: resultT,
+        locals: [{ id: "g.0", name: "groups", type: groupsT, mutable: true }],
+        body: [{ kind: "return", value: { kind: "recordLit", fields, type: resultT, loc }, loc }],
+        loc,
+      });
+    }
+    return {
+      kind: "call",
+      callee: helper,
+      args: [L.lowerExprExpecting(groupsNode, groupsT)],
+      type: resultT,
+      loc,
+    };
+  }
+
   /** A source expression that is definitely null/undefined at runtime.
    * Object.assign skips it, but argument evaluation still happens in its
    * original position. */
@@ -7672,6 +7879,10 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
           return L.lowerExpr(source);
         }
       }
+      // The generated fixed-catalog flattening shape: a fresh target plus
+      // the statically enumerable Object.values(groups) spread.
+      const catalogSpread = lowerStaticCatalogAssignSpread(L, call);
+      if (catalogSpread) return catalogSpread;
       // `Object.assign(target, ...sources)` into an INDEX-SIGNATURE record
       // (the init-config merge pattern): the keyed-write walk over each
       // source, returning the target — lower-containers owns the matrix.
@@ -8020,8 +8231,17 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       if (probed?.type.kind === "record") argIr = probed.type;
     }
     const loc = locOf(call);
-    const resultT = L.irTypeOf(call);
-    if (resultT.kind !== "array") L.badType(call, L.typeOf(call)); // defensive
+    let resultT = L.mapTypeOf(L.typeOf(call));
+    // Generic catalog helpers keep ScriptcObjectValue<T> as a symbolic
+    // conditional type in their body even though T is monomorphized. The
+    // fixed receiver shape supplies the exact finite value union directly.
+    if (resultT === null && member === "values" && argIr?.kind === "record") {
+      const fixedShape = L.shapes.get(argIr.shapeId);
+      if (fixedShape && !fixedShape.tuple && !fixedShape.indexValue && !shapeHasAccessorSlots(fixedShape)) {
+        resultT = staticRecordValuesResultType(L, fixedShape);
+      }
+    }
+    if (resultT?.kind !== "array") L.badType(call, L.typeOf(call)); // defensive
     if (argIr?.kind === "array") {
       const receiver = L.lowerExpr(argNode);
       if (receiver.type.kind !== "array") return null;
