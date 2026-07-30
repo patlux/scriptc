@@ -23,6 +23,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import { analyze, compile, validateModule } from "@scriptc/compiler";
+import type { IrExpr } from "../../packages/compiler/src/ir/nodes.js";
 import { checkPreflight, loadProgram } from "../../packages/compiler/src/frontend/program.js";
 import { lowerToIr } from "../../packages/compiler/src/frontend/lowering/lowerer.js";
 
@@ -141,6 +142,11 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // globalThis.Intl.Segmenter resolves absent and the static fallback
     // class stays a native class through calls, methods, and iteration.
     ["segmenter-boundary-static", "segmenter-boundary-cli.ts"],
+    // Pi extension/package-layout shapes: generic optional properties may
+    // lower through checked-dynamic instances, while a
+    // Record<string,string|undefined> overflow stays a native union slot.
+    // Both ??= expressions must produce validator-canonical result types.
+    ["nullish-assignment-static", "nullish-assignment-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, pkg.split(","));
@@ -182,6 +188,41 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.stats.statementsFailed).toBe(0);
     expect(coverage.stats.statementsIsland).toBe(0);
   }, 120_000);
+
+  test("nullish assignment package shapes produce validator-clean canonical IR", () => {
+    const entry = join(pilotRoot, "nullish-assignment-cli.ts");
+    const packages = ["nullish-assignment-static"];
+    const load = loadProgram(entry, { npmStatic: packages });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder, { dynamic: true });
+      expect(lowered.diagnostics).toEqual([]);
+      const module = lowered.module;
+      expect(module).not.toBeNull();
+      if (module === null) throw new Error("nullish assignment fixture produced no IR module");
+      expect(validateModule(module)).toEqual([]);
+      const nodes: Array<IrExpr & { kind: "nullish" }> = [];
+      const isNullishExpr = (value: object): value is IrExpr & { kind: "nullish" } =>
+        "kind" in value && value.kind === "nullish";
+      const visit = (value: unknown): void => {
+        if (value === null || typeof value !== "object") return;
+        if (Array.isArray(value)) {
+          for (const item of value) visit(item);
+          return;
+        }
+        if (isNullishExpr(value)) nodes.push(value);
+        for (const [key, child] of Object.entries(value)) {
+          if (key !== "loc") visit(child);
+        }
+      };
+      visit(module);
+      expect(nodes.filter((node) => node.left.type.kind === "dyn")).toHaveLength(2);
+      expect(nodes.filter((node) => node.left.type.kind === "dyn").every((node) => node.right.type.kind === "dyn" && node.type.kind === "dyn")).toBe(true);
+      expect(nodes.some((node) => node.left.type.kind === "union" && node.right.type.kind === "string" && node.type.kind === "string")).toBe(true);
+    } finally {
+      load.dispose();
+    }
+  });
 
   test("cross-package definition scheduling produces validator-clean exact-once IR", () => {
     const entry = join(pilotRoot, "definition-scheduling-cli.ts");

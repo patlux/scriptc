@@ -218,6 +218,57 @@ test("validator keeps direct-call return types fail-closed", () => {
   );
 });
 
+test("validator keeps nullish result worlds fail-closed", () => {
+  const loc = { file: "nullish.ts", start: 0, end: 0 };
+  const union: IrType = { kind: "union", unionId: "u0" };
+  const mod: IrModule = {
+    irVersion: 4,
+    sourceFile: "nullish.ts",
+    entry: "%main",
+    unions: [{ id: "u0", arms: [STRING, { kind: "undefinedT" }] }],
+    functions: [{
+      name: "%main",
+      params: [
+        { localId: "d.0", name: "d", type: DYN },
+        { localId: "u.0", name: "u", type: union },
+      ],
+      returnType: VOID,
+      locals: [
+        { id: "d.0", name: "d", type: DYN, mutable: true },
+        { id: "u.0", name: "u", type: union, mutable: true },
+      ],
+      body: [
+        {
+          kind: "exprStmt",
+          expr: {
+            kind: "nullish",
+            left: { kind: "varRef", localId: "d.0", type: DYN, loc },
+            right: { kind: "strLit", value: "fallback", type: STRING, loc },
+            type: STRING,
+            loc,
+          },
+          loc,
+        },
+        {
+          kind: "exprStmt",
+          expr: {
+            kind: "nullish",
+            left: { kind: "varRef", localId: "u.0", type: union, loc },
+            right: { kind: "boolLit", value: false, type: BOOL, loc },
+            type: BOOL,
+            loc,
+          },
+          loc,
+        },
+      ],
+      loc,
+    }],
+  };
+  const errors = validateModule(mod).map((e) => e.message);
+  expect(errors).toContain("in %main: dyn nullish must answer dyn");
+  expect(errors).toContain("in %main: nullish type must be the left union or its single non-unit arm");
+});
+
 test("validator keeps island method arguments fail-closed", () => {
   const loc = { file: "method.js", start: 0, end: 0 };
   const mod: IrModule = {

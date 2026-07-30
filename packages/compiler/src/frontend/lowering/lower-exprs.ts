@@ -6372,17 +6372,45 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
     return test;
   }
 
+/** The result representation of a stable `??=` reference. The checker can
+   * report an island-shaped result for inferred JavaScript instances even
+   * though the lowered receiver stayed in the checked-dynamic tree, or for
+   * an index slot whose lowered read is a native unit-armed union. The IR
+   * `nullish` node deliberately has only its three canonical worlds:
+   * jsval→jsval, dyn→dyn, and union→that union or its one non-unit arm.
+   * Prefer the checker's result when it is already one of those shapes;
+   * otherwise use the single non-unit arm. The assignment's RHS is coerced
+   * into that answer before storage, so this is the same representation-only
+   * adaptation ordinary assignment expressions already use. */
+  function nullishAssignResultType(
+    L: Lowerer,
+    read: IrExpr,
+    requested: IrType,
+  ): IrType {
+    if (read.type.kind === "dyn") return DYN;
+    if (read.type.kind !== "union") {
+      return typeEquals(read.type, requested) ? requested : read.type;
+    }
+    if (typeEquals(read.type, requested)) return requested;
+    const def = L.unions.get(read.type.unionId);
+    if (!def) throw new Error(`lowerer bug: unknown union ${read.type.unionId} in nullish assignment`);
+    const rest = def.arms.filter((arm) => !isUnitType(arm));
+    if (rest.length === 1) return rest[0]!;
+    return read.type;
+  }
+
 /** Shared `??=` value shape after the lvalue reference has been made
    * stable. `prefix` evaluates receiver/key in source order, `read` runs
    * exactly once, and the RHS plus write live only in the nullish branch.
-   * The `nullish` node also preserves the compound expression's value: the
-   * existing non-nullish value, or the assigned RHS after slot coercion. */
+   * The `nullish` node preserves the compound expression's value in its
+   * canonical runtime world; only the value written into the slot is
+   * coerced/wrapped to the slot representation. */
   function lowerStableNullishAssign(
     L: Lowerer,
     prefix: IrStmt[],
     read: IrExpr,
     slotType: IrType,
-    resultType: IrType,
+    requestedResultType: IrType,
     right: ts.Expression,
     write: (value: IrExpr) => IrStmt,
     loc: SrcLoc,
@@ -6394,6 +6422,7 @@ export function lowerObjectLiteral(L: Lowerer, expr: ts.ObjectLiteralExpression)
         "'??=' through island-backed properties or indices (use a statically shaped record or checked-dynamic value)",
       );
     }
+    const resultType = nullishAssignResultType(L, read, requestedResultType);
     const wrap = (result: IrExpr): IrExpr =>
       prefix.length === 0
         ? result

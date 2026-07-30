@@ -58,6 +58,21 @@ console.log(slots.unknownValue, rhsCalls);
 slots.unknownValue ??= rhs("unknown-skipped");
 console.log(slots.unknownValue, rhsCalls);
 
+// Generic optional properties can lower through a checked-dynamic receiver
+// in an inferred JS-style instance. The ??= answer must stay dyn even when
+// the checker reports another representation for the compound expression.
+interface GenericOptional<T> {
+  value?: T;
+}
+function fillGeneric<T>(box: GenericOptional<T>, value: T): void {
+  box.value ??= value;
+}
+const genericObject: GenericOptional<{ label: string }> = {};
+const genericNumber: GenericOptional<number> = {};
+fillGeneric(genericObject, { label: "generic" });
+fillGeneric(genericNumber, 17);
+console.log(genericObject.value?.label, genericNumber.value);
+
 const dict: Record<string, string | undefined> = {};
 let dynamicKey = "missing";
 dict[dynamicKey] ??= rhs("index");
