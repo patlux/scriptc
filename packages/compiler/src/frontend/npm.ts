@@ -457,6 +457,7 @@ interface PkgJson {
   module?: string;
   type?: string;
   exports?: unknown;
+  imports?: unknown;
 }
 
 /** Package name from a specifier ("@scope/pkg/sub" → "@scope/pkg"). */
@@ -1114,6 +1115,42 @@ export class NpmGraphBuilder {
     return full.join(" → ");
   }
 
+  /** Resolves a package-internal `#name` imports-field edge from the
+   * nearest package scope. Exact/pattern keys and node/import/require/default
+   * conditions reuse the exports resolver; targets must stay package-
+   * relative for now (the packages exercised here use that Node form). */
+  private resolvePackageImport(
+    fromFile: string,
+    specifier: string,
+    mode: "import" | "require",
+    ctx: { importer: string; chain: readonly string[] },
+  ): string | null {
+    for (let dir = dirname(fromFile); ; ) {
+      const pkg = this.pkgJsonOf(dir);
+      if (pkg) {
+        if (!pkg.imports || typeof pkg.imports !== "object" || Array.isArray(pkg.imports)) break;
+        const rekeyed: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(pkg.imports as Record<string, unknown>)) {
+          if (key.startsWith("#")) rekeyed["." + key.slice(1)] = value;
+        }
+        const target = resolveExports(rekeyed, "." + specifier.slice(1), mode);
+        if (target === null || !target.startsWith("./")) break;
+        const resolved = this.resolveFile(join(dir, target));
+        if (resolved) return this.host.realpath(resolved);
+        break;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    this.errors.push({
+      message:
+        `cannot resolve package import '${specifier}' from ${ctx.importer}` +
+        ` (dependency chain: ${NpmGraphBuilder.chainOf(ctx.chain)})`,
+    });
+    return null;
+  }
+
   /** Locates node_modules/<name> by walking up from `fromDir` to the
    * filesystem ROOT (dependencies hoist arbitrarily far in workspace
    * layouts), following symlinks with realpath (pnpm/bun virtual stores),
@@ -1413,14 +1450,9 @@ export class NpmGraphBuilder {
         }
         continue;
       }
-      // A bare dependency package: Node picks the "exports" condition set
-      // from the EDGE KIND, never from the importer's format — import/
-      // export declarations and import() resolve with ["node","import"],
-      // require() with ["node","require"] — so a dual package legitimately
-      // embeds TWO targets for one specifier, each behind its own
-      // kind-tagged edge (the island's module loader asks with the import
-      // kind, its require shim with the require kind).
-      const depName = packageNameOf(spec);
+      // A bare dependency package or package-internal imports-field edge:
+      // Node picks conditions from the EDGE KIND, never the importer format.
+      const depName = spec.startsWith("#") ? pkgName : packageNameOf(spec);
       const nextChain = depName === pkgName ? chain : [...chain, depName];
       if (use.require) {
         // require edges attribute to the module whose scope DEFINES the
@@ -1434,10 +1466,12 @@ export class NpmGraphBuilder {
         if (use.requireViaHelper) froms.add(this.requireHelperOriginOf(key) ?? key);
         for (const from of froms) {
           const errorsBefore = this.errors.length;
-          const to = this.resolvePackage(dirname(from), spec, "require", {
-            importer: from,
-            chain,
-          });
+          const to = spec.startsWith("#")
+            ? this.resolvePackageImport(from, spec, "require", { importer: from, chain })
+            : this.resolvePackage(dirname(from), spec, "require", {
+                importer: from,
+                chain,
+              });
           if (to === null) {
             // require failures are ALWAYS lazy — no edge embeds; the
             // island's require shim throws Node's MODULE_NOT_FOUND with
@@ -1469,7 +1503,9 @@ export class NpmGraphBuilder {
       }
       if (use.static || use.dynamicImport) {
         const errorsBefore = this.errors.length;
-        const to = this.resolvePackage(dirname(key), spec, "import", { importer: key, chain });
+        const to = spec.startsWith("#")
+          ? this.resolvePackageImport(key, spec, "import", { importer: key, chain })
+          : this.resolvePackage(dirname(key), spec, "import", { importer: key, chain });
         if (to === null) {
           if (!eager) {
             // Roll the resolver's diagnostics back off the build — the

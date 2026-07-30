@@ -50,7 +50,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { arrayOf, BOOL, canAdaptDynCallableRecordTo, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
+import { arrayOf, BOOL, canAdaptDynCallableRecordTo, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isSupportedMapKey, isSupportedMapValue, isUndefinedArmedUnion, isUnitType, JSVAL, mapOf, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
 import { type DynamicImportResolution, type NpmBuiltinUse, type NpmLazyTrap } from "../npm.js";
 import { provenanceActive } from "../provenance-registry.js";
 import {
@@ -134,6 +134,20 @@ export type WidthLift =
   | { how: "funcAdapt" };
 
 export class PoisonError extends Error {}
+
+/** Cross-pass evidence for npm-static JS `const x = new Map()` bindings.
+ * Discovery observes concrete reached call instances; emit recreates the
+ * specialization in its own registries before lowering module init. Plain
+ * IR kinds may be cached directly; registry-owned records/unions keep their
+ * checker type so emit interns fresh ids. */
+type JsMapTypeEvidence =
+  | { kind: "ir"; type: IrType }
+  | { kind: "ts"; type: ts.Type };
+interface JsMapSpecialization {
+  key: JsMapTypeEvidence;
+  value: JsMapTypeEvidence;
+}
+const jsMapSpecializations = new WeakMap<ts.Program, Map<ts.Symbol, JsMapSpecialization>>();
 
 /** Own-property lookup for the surface tables. They are plain object
  * literals, so a bare `table[name]` would also find Object.prototype
@@ -840,6 +854,11 @@ export class Lowerer {
    * typeParamBindings — the checker has no `T` to substitute, so the
    * binding rides the node-type accessor instead of mapType. */
   implicitParamTypes: Map<ts.Symbol, ts.Type> | null = null;
+  /** The IR-level twin for those params. Some specializations (notably a
+   * module-global JS Map inferred from its calls) have no checker type that
+   * can spell the concrete runtime representation; mapTypeOf consults this
+   * table before mapping the checker's stale `any`. */
+  implicitParamIrTypes: Map<ts.Symbol, IrType> | null = null;
   /** IMPLICIT-ANY instances lowered EAGERLY at first demand (their return
    * types are inferred from the body — the call site needs them settled),
    * collected here for run()'s function list (the liftedFns discipline). */
@@ -980,6 +999,14 @@ export class Lowerer {
   /** The class whose members are lowering — `super` binds lexically to it
    * (arrows inside methods lower within this window, so they see it too). */
   currentClass: ClassInfo | null = null;
+  /** Npm-static JS `const x = new Map()` declarations whose erased
+   * Map<any, any> checker type can be specialized from concrete calls of
+   * their containing implicit-any functions. Registration is deferred
+   * until the first sound specialization, then every function/import sees
+   * the same module-global storage. */
+  readonly pendingJsMapGlobals = new Map<ts.Symbol, { decl: ts.VariableDeclaration; tag: string; nsPrefix: string }>();
+  /** Active implicit-instance refinements for those pending Map bindings. */
+  readonly implicitMapGlobalTypes = new Map<ts.Symbol, IrType & { kind: "map" }>();
   readonly globalsBySymbol = new Map<ts.Symbol, IrGlobal>();
   /** Expando function members (`foo.bar = 12` on a module-level function
    * or callable const): per function symbol, each written member's module
@@ -2281,6 +2308,7 @@ export class Lowerer {
       }
       drainInstances();
     }
+    this.inferRemainingPendingJsMaps();
     return reachable;
   }
 
@@ -2676,10 +2704,175 @@ export class Lowerer {
     return t;
   }
 
-  /** mapType with this Lowerer's registries and (while a generic instance
-   * body lowers) type-parameter bindings threaded through. */
+  /** The concrete IR binding of an active implicit-any parameter symbol,
+   * when one exists. */
+  implicitIrTypeOfSymbol(symbol: ts.Symbol | undefined): IrType | null {
+    return symbol && this.implicitParamIrTypes ? (this.implicitParamIrTypes.get(symbol) ?? null) : null;
+  }
+
+  /** mapType with this Lowerer's registries and (while a generic/implicit
+   * instance body lowers) concrete bindings threaded through. */
   mapTypeOf(t: ts.Type): IrType | null {
+    if (this.implicitParamTypes !== null && this.implicitParamIrTypes !== null) {
+      for (const [symbol, bound] of this.implicitParamTypes) {
+        if (bound === t) {
+          const ir = this.implicitParamIrTypes.get(symbol);
+          if (ir) return ir;
+        }
+      }
+    }
     return mapType(t, this.typeCtx);
+  }
+
+  /** The effective IR type of a Map call argument under an active
+   * implicit-any specialization. Identifier parameters use their concrete
+   * ABI slot even when the checker still says `any`; all other expressions
+   * use their normal mapped type. */
+  private pendingMapArgType(arg: ts.Expression): IrType | null {
+    if (ts.isIdentifier(arg)) {
+      const implicit = this.implicitIrTypeOfSymbol(this.checker.getSymbolAtLocation(arg));
+      if (implicit) return implicit;
+      const mapped = this.mapTypeOf(this.typeOf(arg));
+      // A non-specialized erased parameter reads as jsval in --dynamic;
+      // that is no evidence about the Map representation. Let the caller
+      // choose the conservative string/dyn fallback instead.
+      return mapped?.kind === "jsval" ? null : mapped;
+    }
+    const mapped = this.mapTypeOf(this.typeOf(arg));
+    return mapped?.kind === "jsval" ? null : mapped;
+  }
+
+  /** Cache evidence that can be recreated safely by the emit Lowerer.
+   * Shape/union ids belong to one Lowerer, so those retain their checker
+   * type; plain kinds (especially dyn) may cross passes directly. */
+  private pendingMapEvidence(arg: ts.Expression, type: IrType): JsMapTypeEvidence {
+    return type.kind === "record" || type.kind === "union"
+      ? { kind: "ts", type: this.checker.getBaseTypeOfLiteralType(this.typeOf(arg)) }
+      : { kind: "ir", type };
+  }
+
+  private materializeMapEvidence(evidence: JsMapTypeEvidence): IrType | null {
+    return evidence.kind === "ir" ? evidence.type : this.mapTypeOf(evidence.type);
+  }
+
+  /** Registers one deferred npm-static JS Map binding at its first sound
+   * reached `.set()` specialization. An `any` key becomes the active
+   * implicit parameter's concrete type when available; otherwise it
+   * defaults to string (Pi's erased registries/caches all key by ids).
+   * An `any` value becomes dyn, preserving the checked runtime value rather
+   * than pretending an unsupported static representation. Unsupported
+   * explicit initializer/value types remain fenced. */
+  specializePendingJsMapGlobal(
+    ident: ts.Identifier,
+    method: string,
+    args: readonly ts.Expression[],
+  ): (IrType & { kind: "map" }) | null {
+    const symbol = this.resolveValueSymbol(ident);
+    if (!symbol || !this.pendingJsMapGlobals.has(symbol)) return null;
+    const all = jsMapSpecializations.get(this.program) ?? new Map<ts.Symbol, JsMapSpecialization>();
+    jsMapSpecializations.set(this.program, all);
+    const cached = all.get(symbol);
+    if (!cached && method === "set" && args.length >= 2) {
+      const keyOwn = this.pendingMapArgType(args[0]!);
+      const valueOwn = this.pendingMapArgType(args[1]!);
+      let key = keyOwn?.kind === "jsval" || keyOwn?.kind === "dyn" || keyOwn === null ? STRING : keyOwn;
+      if (key.kind === "union" && !isSupportedMapKey(key)) key = STRING;
+      let value = valueOwn?.kind === "jsval" || valueOwn === null ? DYN : valueOwn;
+      // Erased control-flow unions can mix a real string id with an object
+      // value at the same set site (Pi's generated BUILTIN_APIS tuple).
+      // Such a union is not a legal Map key/value representation; dyn is
+      // the honest common runtime domain, while explicit unsupported
+      // non-union values still remain fenced below.
+      if (value.kind === "union" && !isSupportedMapValue(value)) value = DYN;
+      if (!isSupportedMapKey(key) || !isSupportedMapValue(value)) return null;
+      all.set(symbol, {
+        key: this.pendingMapEvidence(args[0]!, key),
+        value: this.pendingMapEvidence(args[1]!, value),
+      });
+      return this.registerPendingJsMapGlobal(symbol, mapOf(key, value) as IrType & { kind: "map" });
+    }
+    return this.materializePendingJsMapGlobal(symbol);
+  }
+
+  /** Pre-scans a reached body before statement lowering so a later set can
+   * select the module Map representation before earlier has/get/clear or a
+   * nested scheduled callback reads it. The scan intentionally skips nested
+   * function bodies: their own reached lowering supplies evidence. */
+  preSpecializePendingJsMaps(node: ts.Node): void {
+    const root = node;
+    const visit = (candidate: ts.Node): void => {
+      if (
+        candidate !== root &&
+        (ts.isFunctionDeclaration(candidate) || ts.isFunctionExpression(candidate) || ts.isArrowFunction(candidate))
+      ) {
+        return;
+      }
+      if (
+        ts.isCallExpression(candidate) &&
+        ts.isPropertyAccessExpression(candidate.expression) &&
+        candidate.expression.name.text === "set" &&
+        ts.isIdentifier(candidate.expression.expression)
+      ) {
+        this.specializePendingJsMapGlobal(candidate.expression.expression, "set", candidate.arguments);
+      }
+      ts.forEachChild(candidate, visit);
+    };
+    visit(node);
+  }
+
+  private registerPendingJsMapGlobal(
+    symbol: ts.Symbol,
+    specialized: IrType & { kind: "map" },
+  ): (IrType & { kind: "map" }) | null {
+    const pending = this.pendingJsMapGlobals.get(symbol);
+    if (!pending) return null;
+    const existing = this.implicitMapGlobalTypes.get(symbol);
+    if (existing && !typeEquals(existing, specialized)) return null;
+    this.implicitMapGlobalTypes.set(symbol, specialized);
+    if (!this.globalsBySymbol.has(symbol)) {
+      const name = ts.isIdentifier(pending.decl.name) ? pending.decl.name.text : pending.decl.name.getText();
+      const global: IrGlobal = {
+        id: `%g.${pending.tag}${pending.nsPrefix}${name}`,
+        name,
+        type: specialized,
+        mutable: false,
+      };
+      this.globalsBySymbol.set(symbol, global);
+      this.globalsList.push(global);
+    }
+    return specialized;
+  }
+
+  /** Discovery fallback for a Map whose reached bodies supplied no set
+   * evidence (for example a public clear() root while the private writer
+   * is unreached). Scan every program body after the reachability fixpoint;
+   * checker-any arguments conservatively select string/dyn. Precise reached
+   * instances already cached their specialization and therefore win. */
+  inferRemainingPendingJsMaps(): void {
+    for (const sf of this.moduleOrder) {
+      ts.walkPreorder(sf, (candidate) => {
+        if (
+          ts.isCallExpression(candidate) &&
+          ts.isPropertyAccessExpression(candidate.expression) &&
+          candidate.expression.name.text === "set" &&
+          ts.isIdentifier(candidate.expression.expression)
+        ) {
+          this.specializePendingJsMapGlobal(candidate.expression.expression, "set", candidate.arguments);
+        }
+        return undefined;
+      });
+    }
+  }
+
+  /** Recreates a cached specialization in this pass's shape/union
+   * registries and registers exactly one global slot. */
+  materializePendingJsMapGlobal(symbol: ts.Symbol): (IrType & { kind: "map" }) | null {
+    const evidence = jsMapSpecializations.get(this.program)?.get(symbol);
+    if (!evidence || !this.pendingJsMapGlobals.has(symbol)) return null;
+    const key = this.materializeMapEvidence(evidence.key);
+    const value = this.materializeMapEvidence(evidence.value);
+    if (!key || !value || !isSupportedMapKey(key) || !isSupportedMapValue(value)) return null;
+    return this.registerPendingJsMapGlobal(symbol, mapOf(key, value) as IrType & { kind: "map" });
   }
 
   /** The one position where a contextual UNION must not be adopted over the

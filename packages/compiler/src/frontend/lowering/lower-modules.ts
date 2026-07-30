@@ -1433,6 +1433,30 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
               }
               continue;
             }
+            // A no-arg npm-static JS Map is erased to Map<any, any> by the
+            // checker. Its separately-scheduled implicit-any functions can
+            // still prove a concrete K/V pair from reached set/get calls;
+            // remember the binding so that first specialization registers
+            // one real module global before the declaration lowers.
+            if (
+              isJsSourceFile(sf) && ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              decl.initializer !== undefined && ts.isNewExpression(decl.initializer) &&
+              ts.isIdentifier(decl.initializer.expression) && decl.initializer.expression.text === "Map" &&
+              (decl.initializer.arguments?.length ?? 0) === 0 &&
+              (() => {
+                const t = L.typeOf(nameNode);
+                if (L.mapTypeOf(t)) return false;
+                const args = L.checker.getTypeArguments(t as ts.TypeReference);
+                return args.length === 2 && args.every((arg) => (arg.flags & ts.TypeFlags.Any) !== 0);
+              })()
+            ) {
+              const symbol = L.checker.getSymbolAtLocation(nameNode);
+              if (symbol) {
+                L.pendingJsMapGlobals.set(symbol, { decl, tag, nsPrefix });
+                L.materializePendingJsMapGlobal(symbol);
+              }
+              continue;
+            }
             // JS declarations whose STRICT type has no mapping register no
             // global at all: the declaration lowers as an %init-body LOCAL
             // whose type adopts the initializer's (lowerVarDecl's JS

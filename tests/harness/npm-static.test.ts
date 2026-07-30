@@ -147,6 +147,11 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // Record<string,string|undefined> overflow stays a native union slot.
     // Both ??= expressions must produce validator-canonical result types.
     ["nullish-assignment-static", "nullish-assignment-cli.ts"],
+    // Shipped-JS `const values = new Map()` specializes from reached
+    // implicit-any calls into one module-global Map<string, number> shared
+    // by exports and a nested scheduled callback. Mutation, order,
+    // delete/clear, identity, and teardown all stay native.
+    ["map-global-static", "map-global-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, pkg.split(","));
@@ -233,6 +238,29 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.stats.statementsFailed).toBe(0);
     expect(coverage.stats.statementsIsland).toBe(0);
   }, 120_000);
+
+  test("module-global Map specialization produces validator-clean exact-once IR", () => {
+    const entry = join(pilotRoot, "map-global-cli.ts");
+    const packages = ["map-global-static"];
+    const load = loadProgram(entry, { npmStatic: packages });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder);
+      expect(lowered.diagnostics).toEqual([]);
+      const module = lowered.module;
+      expect(module).not.toBeNull();
+      if (module === null) throw new Error("map-global fixture produced no IR module");
+      expect(validateModule(module)).toEqual([]);
+      expect(module.globals?.filter((global) => global.name === "values")).toHaveLength(1);
+      expect(module.globals?.find((global) => global.name === "values")?.type).toEqual({
+        kind: "map",
+        key: { kind: "string" },
+        value: { kind: "f64" },
+      });
+    } finally {
+      load.dispose();
+    }
+  });
 
   test("nullish assignment package shapes produce validator-clean canonical IR", () => {
     const entry = join(pilotRoot, "nullish-assignment-cli.ts");

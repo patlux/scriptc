@@ -412,6 +412,13 @@ export function isSupportedMapValue(t: IrType): boolean {
     case "union":
     case "array":
       return true;
+    // Erased shipped-JS Maps specialize unknown-valued slots to dyn. The
+    // checked-dynamic tree is refcounted through scr_dyn_*_v; it is not
+    // traced, matching captured dyn boxes (cycles through engine/unknown
+    // values stay conservative and never dangle). Typed Map<K, unknown>
+    // uses the same representation and boundary checks on every read.
+    case "dyn":
+      return true;
     // A spawned child handle (Map<string, ChildProcess> — the mdns
     // publisher registry): an ordinary refcounted pointer value (the
     // scr_child_retain/release adapters), stored and read like any ref.

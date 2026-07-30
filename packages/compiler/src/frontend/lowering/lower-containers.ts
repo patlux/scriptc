@@ -2085,9 +2085,13 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
     if (L.chainBlocked(access, call)) return null;
     const name = access.name.text;
     if (!MAP_METHODS.has(name) && !MAP_ITER_METHODS.has(name)) return null;
-    const receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+    let receiverIr = L.mapTypeOf(L.typeOf(access.expression));
+    if (ts.isIdentifier(access.expression)) {
+      receiverIr = L.specializePendingJsMapGlobal(access.expression, name, call.arguments) ?? receiverIr;
+    }
     if (receiverIr?.kind !== "map") return null;
-    if (!L.isStdlibMember(access)) return null;
+    const specializedSymbol = ts.isIdentifier(access.expression) ? L.resolveValueSymbol(access.expression) : null;
+    if (!L.isStdlibMember(access) && !(specializedSymbol && L.implicitMapGlobalTypes.has(specializedSymbol))) return null;
     const loc = locOf(call);
     const receiver = L.lowerExpr(access.expression);
     // The lib's `set` returns the Map (chaining typechecks); the lowered
@@ -2111,11 +2115,12 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
 
     if (name === "get") {
       const k = L.lowerExprExpecting(call.arguments[0]!, receiverIr.key);
-      // The checker types the call `V | undefined`, which interns the
-      // result union. `undefined` sorts LAST among all possible arm
-      // typeKeys, so when V is itself a union its arms keep their tags in
-      // the result union — the backend leans on that (docs/ir.md).
-      const type = L.irTypeOf(call);
+      // The checker types ordinary Maps as `V | undefined`. Erased
+      // npm-static JS Maps still say `any`, so build the same canonical
+      // result from the specialized value type.
+      const type = (L.typeOf(call).flags & ts.TypeFlags.Any) !== 0
+        ? L.withUndefinedArm(receiverIr.value)
+        : L.irTypeOf(call);
       if (type.kind !== "union") L.badType(call, L.typeOf(call));
       return { kind: "mapIntrinsic", method: "get", receiver, args: [k], type, loc };
     }

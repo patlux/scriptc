@@ -1393,6 +1393,7 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     const prevSuppress = L.suppressStats;
     const prevClass = L.currentClass;
     const prevImplicit = L.implicitParamTypes;
+    const prevImplicitIr = L.implicitParamIrTypes;
     // A generic METHOD of a generic-class INSTANTIATION lowers under BOTH
     // binding sets: the receiver instantiation's class type parameters
     // underneath, the method instantiation's own on top (disjoint symbol
@@ -1413,6 +1414,12 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     // mapType to substitute); see the implicit-monomorphization section.
     L.implicitParamTypes =
       info.implicitParams !== undefined ? (inst.implicitArgTypes ?? new Map()) : null;
+    L.implicitParamIrTypes =
+      info.implicitParams !== undefined
+        ? new Map(info.implicitParams.flatMap((symbol, i) =>
+            symbol ? [[symbol, inst.params[i]!.type] as const] : [],
+          ))
+        : null;
     L.instantiationContext = `instantiating '${info.baseName}' with ${inst.typeArgsText}`;
     // Coverage counts a generic source body once: re-instantiations of the
     // method AND re-instantiations of the declaring generic class re-visit
@@ -1452,6 +1459,9 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
     }
     L.fnStack.push(fnCtx);
     try {
+      if (info.implicitParams !== undefined && decl.body !== undefined) {
+        L.preSpecializePendingJsMaps(decl.body);
+      }
       // STATIC generic methods: `this`/`super` name the RECEIVER class (a
       // dynamic value) — the lowerStaticMethod fence, applied here because
       // generic statics have no non-generic lowering pass. Arrow functions
@@ -1549,6 +1559,7 @@ export function genericFnOf(L: Lowerer, ident: ts.Identifier): GenericFnInfo | n
       L.typeParamBindings = prevBindings;
       L.typeParamTsBindings = prevTsBindings;
       L.implicitParamTypes = prevImplicit;
+      L.implicitParamIrTypes = prevImplicitIr;
       L.instantiationContext = prevContext;
       L.suppressStats = prevSuppress;
     }

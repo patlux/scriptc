@@ -2890,8 +2890,12 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     // (statics are zero/NULL-initialized; uninitialized globals need no
     // statement at all).
     const declSymbol = L.checker.getSymbolAtLocation(decl.name);
+    const pendingMapType = declSymbol ? L.implicitMapGlobalTypes.get(declSymbol) : undefined;
     const g = declSymbol ? L.globalsBySymbol.get(declSymbol) : undefined;
     if (g) {
+      if (pendingMapType && decl.initializer && ts.isNewExpression(decl.initializer)) {
+        return { kind: "assign", localId: g.id, value: { kind: "mapNew", type: pendingMapType, loc: locOf(decl) }, loc: locOf(decl) };
+      }
       if (decl.initializer && ts.isCallExpression(decl.initializer)) {
         const fallback = lowerAbsentIntlSegmenterFallbackCall(L, decl.initializer);
         if (fallback) {

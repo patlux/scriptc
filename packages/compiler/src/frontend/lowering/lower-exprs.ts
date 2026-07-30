@@ -742,7 +742,9 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       const local = L.resolveLocal(expr);
       if (local) {
         if (local.type.kind === "caught") return L.caughtRead(expr, local, loc);
-        return L.maybeNarrow({ kind: "varRef", localId: local.id, type: local.type, loc }, expr);
+        const implicitType = L.implicitIrTypeOfSymbol(L.checker.getSymbolAtLocation(expr));
+        const readType = implicitType ?? local.type;
+        return L.maybeNarrow({ kind: "varRef", localId: local.id, type: readType, loc }, expr);
       }
       // `import x = N.y` aliases resolve transparently through globalOf/
       // fnSigOf below; their source-order guards live here (a no-op for
