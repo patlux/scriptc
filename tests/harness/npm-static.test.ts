@@ -169,6 +169,34 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       load.dispose();
     }
   });
+  test.for([undefined, "c"] as const)(
+    "auth-context callable record crosses from the package with one honest import island (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "auth-context-cli.mjs");
+      const packages = ["auth-context-static"];
+      const { coverage } = analyze(entry, { dynamic: true, npmStatic: packages });
+      expect(coverage.npmStatic).toEqual([{ package: "auth-context-static", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.diagnostics).toHaveLength(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      // The auth wrapper itself compiles statically. auth-context-runtime
+      // is the one fallback module: the entry's side-effect import seeds
+      // its embedded source, and the wrapper's variable-specifier import
+      // enters that same island until the dynamic-import path is retired.
+      expect(coverage.stats.statementsFailed).toBe(0);
+      expect(coverage.stats.statementsIsland).toBe(1);
+      const binary = await buildStatic(entry, packages, backend, true);
+      const env = { ...process.env, SCRIPTC_TEST_ENV: "from-harness" };
+      const [nodeRes, nativeRes] = await Promise.all([
+        execFileAsync("node", [entry], { encoding: "buffer", env }).then(({ stdout }) => ({ stdout, exitCode: 0 })),
+        execFileAsync(binary, [], { encoding: "buffer", env }).then(({ stdout }) => ({ stdout, exitCode: 0 })),
+      ]);
+      expect(nodeRes.stdout.toString("utf8")).toBe("island:from-harness\ntrue\n");
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
 
   test("assignment-shaped npm package is fully static with no runtime fences", () => {
     const entry = join(pilotRoot, "assignment-shape-cli.ts");

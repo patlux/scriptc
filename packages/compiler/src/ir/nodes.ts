@@ -5409,8 +5409,11 @@ function canBoxBytesComposite(
 /** A type a dyn value can be VALIDATED into — the dynCheck domain:
  * JSON-safe data, bytes<u8> (a fresh copy out), the %Error extraction,
  * undefined-armed unions of JSON-safe arms, adaptable function types,
- * and the runtime HANDLE kinds (a tag-checked reference unwrap —
- * DYN_HANDLE_KINDS). */
+ * fixed REQUIRED callable records (the dyn→structural-record boundary,
+ * including checked Promise returns), and runtime HANDLE kinds.
+ * Callable records deliberately exclude tuples, index signatures, empty
+ * shapes, optional/non-function fields, and unions containing them: this
+ * lane proves one narrow boundary rather than blanket-casting objects. */
 export function canDynCheckTo(
   t: IrType,
   getRecord: (shapeId: string) => IrRecordShape | undefined,
@@ -5420,6 +5423,13 @@ export function canDynCheckTo(
   if (t.kind === "bytes" && t.elem === "u8") return true;
   if (t.kind === "object" && t.className === "%Error") return true;
   if (t.kind === "func") return canAdaptDynFuncTo(t, getRecord, getUnion);
+  if (t.kind === "record") {
+    const shape = getRecord(t.shapeId);
+    return !!shape && !shape.tuple && !shape.indexValue && shape.fields.length > 0 &&
+      shape.fields.every(
+        (f) => f.type.kind === "func" && canAdaptDynRecordFuncTo(f.type, getRecord, getUnion),
+      );
+  }
   if (DYN_HANDLE_KINDS.has(t.kind)) return true;
   if (t.kind === "union") {
     const def = getUnion(t.unionId);
@@ -5481,6 +5491,27 @@ export function canAdaptDynFuncTo(
       t.ret.kind === "dyn" ||
       t.ret.kind === "jsval" ||
       canDynCheckTo(t.ret, getRecord, getUnion))
+  );
+}
+
+/** The record-method extension of canAdaptDynFuncTo: same argument rules,
+ * plus a Promise result whose fulfillment can be checked. Kept separate so
+ * this wave does not admit standalone dyn→Promise or dyn→async-function
+ * conversions; only fixed callable-record fields consume it. */
+export function canAdaptDynRecordFuncTo(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+  getUnion: (unionId: string) => IrUnionDef | undefined,
+): boolean {
+  if (t.kind !== "func" || t.rest === true) return false;
+  if (!t.params.every((p) => p.kind === "dyn" || p.kind === "jsval" || canConvertToDyn(p, getRecord, getUnion))) {
+    return false;
+  }
+  if (t.ret.kind !== "promise") return canAdaptDynFuncTo(t, getRecord, getUnion);
+  return (
+    t.ret.inner.kind === "dyn" ||
+    t.ret.inner.kind === "void" ||
+    canDynCheckTo(t.ret.inner, getRecord, getUnion)
   );
 }
 
@@ -5896,6 +5927,7 @@ function moduleUsesPrototypeDispatch(mod: IrModule): boolean {
  * dynInvoke and dc gates (their TUs call into this one) — cc.ts. Same
  * walk shape as moduleUsesZlib. */
 export function moduleUsesDynAsync(mod: IrModule): boolean {
+  const records = new Map((mod.records ?? []).map((r) => [r.id, r]));
   const fns = new Set([
     "async.awaitDyn", "timers.immediatePromise",
     "process.onUnhandledRejection", "process.offUnhandledRejection",
@@ -5914,8 +5946,8 @@ export function moduleUsesDynAsync(mod: IrModule): boolean {
     const node = v as {
       kind?: unknown;
       fn?: unknown;
-      type?: { kind?: unknown };
-      value?: { type?: { kind?: unknown } };
+      type?: IrType;
+      value?: { type?: IrType };
     };
     if (node.kind === "libCall" && typeof node.fn === "string" && fns.has(node.fn)) {
       found = true;
@@ -5935,6 +5967,16 @@ export function moduleUsesDynAsync(mod: IrModule): boolean {
     if (node.kind === "dynFrom" && node.value !== undefined && node.value.type?.kind === "promise") {
       found = true;
       return;
+    }
+    // A callable-record dynCheck emits reverse settlement callbacks for
+    // method Promise returns; those call scr_promise_payload_dyn from the
+    // gated scr_async_dyn.c unit.
+    if (node.kind === "dynCheck" && node.type?.kind === "record") {
+      const shape = records.get(node.type.shapeId);
+      if (shape?.fields.some((f) => f.type.kind === "func" && f.type.ret.kind === "promise")) {
+        found = true;
+        return;
+      }
     }
     for (const key of Object.keys(v)) visit((v as Record<string, unknown>)[key]);
   };

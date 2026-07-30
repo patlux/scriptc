@@ -652,6 +652,28 @@ ScrDyn *scr_await_dyn(ScrPromise *p) {
   }
 }
 
+/* A fulfilled dyn-crossing promise payload as a dyn value (+1). The
+ * emitted dyn→typed promise adapter calls this after race_add selected a
+ * fulfillment; keeping it in this gated TU preserves static size classes. */
+ScrDyn *scr_promise_payload_dyn(ScrPromise *p) {
+  switch (scr_promise_payload_kind(p)) {
+  case SCR_EXC_F64: return scr_dyn_new_num(scr_promise_payload_num(p));
+  case SCR_EXC_BOOL: return scr_dyn_new_bool(scr_promise_payload_flag(p));
+  case SCR_EXC_STR: {
+    ScrStr *v = scr_promise_payload_str(p);
+    ScrDyn *d = scr_dyn_new_str(v);
+    scr_str_release(v);
+    return d;
+  }
+  case SCR_EXC_REF: {
+    void *v = scr_promise_payload_ref(p);
+    return v ? (ScrDyn *)v : scr_dyn_retain(scr_dyn_undefined());
+  }
+  default:
+    return scr_dyn_retain(scr_dyn_undefined());
+  }
+}
+
 /* The rejection reason as a dyn value — the scr_caught_to_dyn stances
  * over a promise's payload slot (identity-preserving for dyn-thrown
  * values and %Error instances). */

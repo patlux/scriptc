@@ -2807,6 +2807,12 @@ ScrDyn *scr_json_parse(ScrStr *text);
 
 /* BORROWED member lookup on a SCR_DYN_OBJ; NULL when the key is absent. */
 ScrDyn *scr_dyn_obj_get(const ScrDyn *d, const char *key, size_t key_len);
+/* Structural-record field read across both dyn worlds: native OBJ reads
+ * its own member; JSVAL runs the engine's real property get (getters and
+ * throws included). Returns +1; a missing native key is the undefined
+ * singleton. Every other root returns NULL untouched so the emitted
+ * record checker can report its ordinary "expected object" failure. */
+ScrDyn *scr_dyn_record_field(const ScrDyn *d, const char *key, size_t key_len);
 
 /* Object.keys/values/entries over the checked-dynamic tree: JS own-key order (array-index
  * keys ascending first), dyn-array results (+1); values/entries RETAIN
@@ -3096,6 +3102,10 @@ ScrDyn *scr_dyn_new_promise_adapting(ScrPromise *src,
                                      void (*adapt)(ScrPromise *dst, ScrPromise *src));
 /* BORROWED peek at the boxed promise; NULL when d is not a promise box. */
 ScrPromise *scr_dyn_promise_of(const ScrDyn *d);
+/* Fulfilled dyn-crossing promise payload as a dyn value (+1). Admits the
+ * defensive scalar/void payload kinds too; adapters call this only after
+ * race_add selected a fulfillment. */
+ScrDyn *scr_promise_payload_dyn(ScrPromise *p);
 
 /* ── island values in the checked-dynamic tree (SCR_DYN_JSVAL) ─────────────────────────
  * Engine routing ops for JSVAL nodes, installed by the gated constructor
@@ -3114,6 +3124,8 @@ typedef struct ScrDynJsvalOps {
   bool (*strict_eq)(ScrJsval *a, ScrJsval *b); /* engine ===; never throws */
   bool (*is_array)(ScrJsval *cell);   /* Array.isArray, engine-side */
   bool (*is_error)(ScrJsval *cell);   /* native Error instance, engine-side */
+  bool (*is_promise)(ScrJsval *cell); /* native Promise instance, engine-side */
+  ScrPromise *(*bridge_dyn_promise)(ScrJsval *cell); /* engine Promise → promise<dyn>; +1 */
   /* ── the routed operation set (lane dyn-routing-ops) ────────────────
    * Each routes to the engine at the moment of use and converts at the
    * boundary: dyn ARGUMENTS cross through scr_jsval_from_dyn (wrapped
@@ -3170,6 +3182,11 @@ const ScrDynJsvalOps *scr_dyn_jsval_ops(void);
 bool scr_dyn_isl_typeof_is(const ScrDyn *d, const char *name);
 bool scr_dyn_isl_is_array(const ScrDyn *d);
 bool scr_dyn_isl_is_error(const ScrDyn *d);
+/* True only for an engine Promise object held in a JSVAL node. */
+bool scr_dyn_isl_is_promise(const ScrDyn *d);
+/* Bridge an engine Promise held in a JSVAL node to promise<dyn> (+1),
+ * or NULL when the root is not a JSVAL / the engine bridge failed. */
+ScrPromise *scr_dyn_isl_bridge_promise(const ScrDyn *d);
 /* The JSVAL honesty ladder: when d is a JSVAL node, THROWS the catchable
  * "<what> on an island value held in 'unknown' is not supported yet"
  * Error and returns false; every other kind returns false untouched.
@@ -4163,6 +4180,9 @@ enum {
    * fresh engine array whose ELEMENTS are the same engine values (the
    * loadPlugins shape: identity crosses, the spine is a copy). */
   SCR_ISLP_JSVAL_ARR = 5,
+  /* Engine fulfillment scalar-normalizes/wraps into a ScrDyn value. Used
+   * by dyn→typed promise adaptation after an engine callable returns. */
+  SCR_ISLP_DYN = 6,
 };
 
 /* Wrap a scriptc promise as an ENGINE promise (async callbacks crossing

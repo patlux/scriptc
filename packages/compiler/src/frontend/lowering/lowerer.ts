@@ -50,7 +50,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
+import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canDynCheckTo, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
 import { type DynamicImportResolution, type NpmBuiltinUse, type NpmLazyTrap } from "../npm.js";
 import { provenanceActive } from "../provenance-registry.js";
 import {
@@ -3026,6 +3026,21 @@ export class Lowerer {
       if (expected.kind === "dyn") {
         return { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc };
       }
+      // The narrow structural callable-record exit: preserve the engine
+      // object as a JSVAL-backed dyn root, then use the same required-key,
+      // callability, receiver-binding, and return-checking boundary as a
+      // native dyn object. No other record shape joins the island exit set.
+      if (
+        expected.kind === "record" &&
+        canDynCheckTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id))
+      ) {
+        return {
+          kind: "dynCheck",
+          value: { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc },
+          type: expected,
+          loc: expr.loc,
+        };
+      }
       // An island value flowing into a PROMISE-typed slot (the inferred
       // `loadPlugins` return — `Promise.all(...)` lowered engine-side
       // against a Promise<any[]> inference): the island→static promise
@@ -3126,7 +3141,10 @@ export class Lowerer {
       const funcOk =
         expected.kind === "func" &&
         canAdaptDynFuncTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id));
-      if (this.jsonSafe(expected) || undefArmedOk || bytesOk || errorOk || funcOk) {
+      const callableRecordOk =
+        expected.kind === "record" &&
+        canDynCheckTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id));
+      if (this.jsonSafe(expected) || undefArmedOk || bytesOk || errorOk || funcOk || callableRecordOk) {
         return { kind: "dynCheck", value: expr, type: expected, loc: expr.loc };
       }
       return expr;
@@ -4440,7 +4458,12 @@ export class Lowerer {
             canMarshalTypedFuncIntoIsland(src, (id) => this.shapes.get(id), (id) => this.unions.get(id))))
       );
     }
-    if (src.kind === "jsval") return this.boundaryExitSafe(dst);
+    if (src.kind === "jsval") {
+      return (
+        this.boundaryExitSafe(dst) ||
+        (dst.kind === "record" && canDynCheckTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
+      );
+    }
     if (dst.kind === "dyn") return src.kind !== "dyn" && this.dynConvertible(src);
     if (src.kind === "dyn") {
       // The checked-dynamic function boundary's OUT direction joins the
@@ -4449,7 +4472,8 @@ export class Lowerer {
       // — the production/development function-choice ternary shape).
       return (
         this.jsonSafe(dst) ||
-        (dst.kind === "func" && canAdaptDynFuncTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
+        (dst.kind === "func" && canAdaptDynFuncTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id))) ||
+        (dst.kind === "record" && canDynCheckTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
       );
     }
     if (dst.kind === "union") {

@@ -7521,6 +7521,15 @@ export function lowerTemplate(L: Lowerer, expr: ts.TemplateExpression): IrExpr {
       ) {
         return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
       }
+      // Fixed required callable records: validate the root object, read
+      // each declared field through its source world, check callability,
+      // and adapt the exact signature. Extra fields remain width-tolerant.
+      if (
+        target.kind === "record" &&
+        canDynCheckTo(target, (id) => L.shapes.get(id), (id) => L.unions.get(id))
+      ) {
+        return { kind: "dynCheck", value: inner, type: target, loc: locOf(expr) };
+      }
       // Runtime HANDLE targets (`u as IncomingMessage` — a boxed handle
       // coming back out of an untyped wrapper): a tag-checked reference
       // unwrap, identity preserved (DYN_HANDLE_KINDS).

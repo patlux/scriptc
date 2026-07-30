@@ -55,6 +55,8 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
       // the path already says where.
       case "func":
         return "function";
+      case "promise":
+        return "Promise";
       // Map/Set-valued index signatures (Record<string, Map<K, V>>): only
       // reachable through the keyed-read miss trap's message — no dynCheck
       // ever expects one.
@@ -1157,7 +1159,13 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`  return r;`);
           break;
         }
-        d.push(`  if (d->kind != SCR_DYN_OBJ) { scr_dyn_check_fail(path, ${want}, d); return NULL; }`);
+        const callableShape = shape.fields.length > 0 && !shape.indexValue &&
+          shape.fields.every((f) => f.type.kind === "func");
+        if (callableShape) {
+          d.push(`  if (d->kind != SCR_DYN_OBJ && d->kind != SCR_DYN_JSVAL) { scr_dyn_check_fail(path, ${want}, d); return NULL; }`);
+        } else {
+          d.push(`  if (d->kind != SCR_DYN_OBJ) { scr_dyn_check_fail(path, ${want}, d); return NULL; }`);
+        }
         d.push(`  ${cDecl(t, "r")} = ${mangleRecordNew(t.shapeId)}();`);
         for (const f of shape.fields) {
           const keyLit = cStringLiteral(Buffer.from(f.name, "utf8"));
@@ -1172,8 +1180,25 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           const utag = f.type.kind === "union" ? E.undefinedArmTag(f.type) : -1;
           d.push(`  {`);
           d.push(`    ScrDynPath p = { path, ${keyLit}, 0 };`);
-          d.push(`    const ScrDyn *m = scr_dyn_obj_get(d, ${keyLit}, ${keyLen});`);
-          if (f.type.kind === "dyn") {
+          if (callableShape && f.type.kind === "func") {
+            const adapter = dynBoundFuncAdapterHelper(E, f.type);
+            d.push(`    ScrDyn *m = scr_dyn_record_field(d, ${keyLit}, ${keyLen});`);
+            d.push(`    if (!m) { ${rel("r")}; return NULL; } /* engine getter threw */`);
+            d.push(`    if (!(m->kind == SCR_DYN_FUNC || (m->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(m, "function")))) {`);
+            d.push(`      scr_dyn_check_fail(&p, ${fieldWant}, m); scr_dyn_release(m); ${rel("r")}; return NULL;`);
+            d.push(`    }`);
+            d.push(`    ScrClosure *a = scr_closure_new((void *)&${adapter}, 2);`);
+            d.push(`    a->caps[0] = scr_box_new_obj(&scr_dyn_retain_v, &scr_dyn_release_v, NULL);`);
+            d.push(`    a->caps[1] = scr_box_new_obj(&scr_dyn_retain_v, &scr_dyn_release_v, NULL);`);
+            d.push(`    scr_box_set_ref(a->caps[0], m); /* ownership moves */`);
+            d.push(`    scr_box_set_ref(a->caps[1], scr_dyn_retain((ScrDyn *)d));`);
+            d.push(`    r->${mangleField(f.name)} = a;`);
+          } else {
+            d.push(`    const ScrDyn *m = scr_dyn_obj_get(d, ${keyLit}, ${keyLen});`);
+          }
+          if (callableShape && f.type.kind === "func") {
+            // handled above
+          } else if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
             // one IS the undefined dyn value (JS's missing-property read).
             d.push(`    (void)p;`);
@@ -1282,6 +1307,25 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           }
           d.push(`  }`);
         });
+        d.push(`  scr_dyn_check_fail(path, ${want}, d);`);
+        d.push(`  return NULL;`);
+        break;
+      }
+      case "promise": {
+        d.push(`  if (d->kind == SCR_DYN_PROMISE) {`);
+        const rev = promiseDynCheckAdapterHelper(E, t.inner);
+        d.push(`    ScrPromise *dst = scr_promise_new();`);
+        d.push(`    scr_promise_race_add(dst, d->v.promise, &${rev});`);
+        d.push(`    return dst;`);
+        d.push(`  }`);
+        d.push(`  if (d->kind == SCR_DYN_JSVAL && scr_dyn_isl_is_promise(d)) {`);
+        d.push(`    ScrPromise *raw = scr_dyn_isl_bridge_promise(d);`);
+        d.push(`    if (!raw) return NULL;`);
+        d.push(`    ScrPromise *dst = scr_promise_new();`);
+        d.push(`    scr_promise_race_add(dst, raw, &${rev});`);
+        d.push(`    scr_promise_release(raw);`);
+        d.push(`    return dst;`);
+        d.push(`  }`);
         d.push(`  scr_dyn_check_fail(path, ${want}, d);`);
         d.push(`  return NULL;`);
         break;
@@ -1578,6 +1622,39 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
     return name;
   }
 
+/** Reverse promise settlement: validate a dyn fulfillment into one typed
+   * payload. Rejections are copied by scr_promise_race_add and never enter
+   * this callback. A lying fulfillment rejects dst with dynCheck's error. */
+  export function promiseDynCheckAdapterHelper(E: CEmitter, inner: IrType): string {
+    const key = typeKey(inner);
+    const existing = E.promiseDynCheckAdapters.get(key);
+    if (existing) return existing;
+    const name = `sc_pdc_${E.promiseDynCheckAdapters.size}`;
+    E.promiseDynCheckAdapters.set(key, name);
+    const sig = `static void ${name}(ScrPromise *dst, ScrPromise *src)`;
+    E.walkerProtos.push(`${sig}; /* check dyn promise payload as ${key} */`);
+    const d: string[] = [`${sig} { /* check dyn promise payload as ${key} */`];
+    d.push(`  ScrDyn *dv = scr_promise_payload_dyn(src);`);
+    d.push(`  ${cDecl(inner, "v")} = ${E.dynCheckHelper(inner)}(dv, NULL);`);
+    d.push(`  scr_dyn_release(dv);`);
+    d.push(`  if (scr_exc_pending()) { scr_promise_reject_pending(dst); return; }`);
+    if (inner.kind === "f64") {
+      d.push(`  scr_promise_fulfill_f64(dst, v);`);
+    } else if (inner.kind === "bool") {
+      d.push(`  scr_promise_fulfill_bool(dst, v);`);
+    } else if (inner.kind === "string") {
+      d.push(`  scr_promise_fulfill_str(dst, v);`);
+    } else if (inner.kind === "void") {
+      d.push(`  scr_promise_fulfill_void(dst);`);
+    } else {
+      const rc = vAdapters(inner);
+      d.push(`  scr_promise_fulfill_ref(dst, v, &${rc.retain}, &${rc.release}, ${E.traceArgC(inner)});`);
+    }
+    d.push(`}`, ``);
+    E.walkerDefs.push(...d);
+    return name;
+  }
+
 /* ── the checked-dynamic function boundary (nodes.ts) ─────────────────
    * Three interned per-signature helpers:
    *
@@ -1705,6 +1782,51 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
       `}`,
       ``,
     );
+    return name;
+  }
+
+/** Adapter for a callable RECORD FIELD. caps[0] owns the function,
+   * caps[1] owns the source object. Calls bind that object as `this`, then
+   * apply the same typed args/results validation as dynFuncAdapterHelper. */
+  export function dynBoundFuncAdapterHelper(E: CEmitter, t: IrType & { kind: "func" }): string {
+    const key = typeKey(t);
+    const existing = E.dynBoundFuncAdapters.get(key);
+    if (existing) return existing;
+    const name = `sc_dfbr_${E.dynBoundFuncAdapters.size}`;
+    E.dynBoundFuncAdapters.set(key, name);
+    const params = ["ScrClosure *sc_env", ...t.params.map((p, i) => cDecl(p, `a${i}`))].join(", ");
+    const sig = `static ${cType(t.ret)}${cType(t.ret).endsWith("*") ? "" : " "}${name}(${params})`;
+    E.walkerProtos.push(`${sig}; /* bound dyn record field to ${key} */`);
+    const dummy = t.ret.kind === "void" ? "" : t.ret.kind === "f64" ? "0" : t.ret.kind === "bool" ? "false" : "NULL";
+    const d: string[] = [`${sig} { /* bound dyn record field to ${key} */`];
+    d.push(`  ScrDyn *sc_fn = (ScrDyn *)scr_box_get_ref(sc_env->caps[0]);`);
+    d.push(`  ScrDyn *sc_recv = (ScrDyn *)scr_box_get_ref(sc_env->caps[1]);`);
+    if (t.params.length > 0) d.push(`  ScrDyn *sc_args[${t.params.length}];`);
+    t.params.forEach((p, i) => {
+      d.push(`  sc_args[${i}] = ${toDynExprC(E, p, `a${i}`)};`);
+      if (isRefCounted(p)) d.push(`  ${releaseCallC(p, `a${i}`)};`);
+    });
+    d.push(`  ScrDyn *sc_r = scr_dyn_call_with_this(sc_fn, sc_recv, ${t.params.length > 0 ? "sc_args" : "NULL"}, ${t.params.length}, "record field");`);
+    d.push(`  scr_dyn_release(sc_fn);`);
+    d.push(`  scr_dyn_release(sc_recv);`);
+    t.params.forEach((_, i) => d.push(`  scr_dyn_release(sc_args[${i}]);`));
+    d.push(`  if (scr_exc_pending()) return ${dummy};`.replace("return ;", "return;"));
+    if (t.ret.kind === "void") {
+      d.push(`  scr_dyn_release(sc_r);`);
+      d.push(`  return;`);
+    } else if (t.ret.kind === "dyn") {
+      d.push(`  return sc_r;`);
+    } else if (t.ret.kind === "jsval") {
+      d.push(`  ScrJsval *out = scr_jsval_from_dyn(sc_r);`);
+      d.push(`  scr_dyn_release(sc_r);`);
+      d.push(`  return out;`);
+    } else {
+      d.push(`  ${cDecl(t.ret, "out")} = ${E.dynCheckHelper(t.ret)}(sc_r, NULL);`);
+      d.push(`  scr_dyn_release(sc_r);`);
+      d.push(`  return out;`);
+    }
+    d.push(`}`, ``);
+    E.walkerDefs.push(...d);
     return name;
   }
 

@@ -79,7 +79,9 @@ export class LlDyn {
   private readonly dynFuncThunks = new Map<string, string>();
   private readonly dynFuncBoxes = new Map<string, string>();
   private readonly dynFuncAdapters = new Map<string, string>();
+  private readonly dynBoundFuncAdapters = new Map<string, string>();
   private readonly promiseDynAdapters = new Map<string, string>();
+  private readonly promiseDynCheckAdapters = new Map<string, string>();
   private dynToStrFn: string | null = null;
   private caughtToDynFn: string | null = null;
   /** Emitted function definitions, in interning order. */
@@ -317,6 +319,8 @@ export class LlDyn {
       }
       case "func":
         return "function";
+      case "promise":
+        return "Promise";
       default: {
         const h = DYN_HANDLE_KINDS.get(t.kind);
         if (h) return h.cls;
@@ -695,12 +699,101 @@ export class LlDyn {
           B.terminate(`ret ptr %r0`);
           break;
         }
-        requireKind(DK.OBJ, "dcr");
+        const callableShape = shape.fields.length > 0 && !shape.indexValue &&
+          shape.fields.every((f) => f.type.kind === "func");
+        if (callableShape) {
+          const kd = this.kindOf(B, "%d");
+          const isObj = B.tmp();
+          const isJs = B.tmp();
+          const ok = B.tmp();
+          B.line(`${isObj} = icmp eq i32 ${kd}, ${DK.OBJ}`);
+          B.line(`${isJs} = icmp eq i32 ${kd}, ${DK.JSVAL}`);
+          B.line(`${ok} = or i1 ${isObj}, ${isJs}`);
+          const lOk = B.newLabel("dcr.k");
+          const lFail = B.newLabel("dcr.f");
+          B.condBr(ok, lOk, lFail);
+          B.startBlock(lFail);
+          B.line(`call void @scr_dyn_check_fail(ptr %path, ptr ${want}, ptr %d)`);
+          B.terminate(`ret ptr null`);
+          B.startBlock(lOk);
+        } else {
+          requireKind(DK.OBJ, "dcr");
+        }
         B.line(`%r0 = call ptr @${mangleRecordNew(t.shapeId)}()`);
         for (const f of shape.fields) {
           const fieldWant = host.cstr(this.dynDesc(f.type));
           const utag = f.type.kind === "union" ? host.undefinedArmTag(f.type) : -1;
-          const m = this.objGetLit(B, "%d", f.name);
+          let m: string;
+          if (callableShape && f.type.kind === "func") {
+            host.declare(`declare ptr @scr_dyn_record_field(ptr, ptr, i64)`);
+            m = B.tmp();
+            B.line(`${m} = call ptr @scr_dyn_record_field(ptr %d, ptr ${host.cstr(f.name)}, i64 ${Buffer.byteLength(f.name, "utf8")})`);
+            const has = B.tmp();
+            B.line(`${has} = icmp ne ptr ${m}, null`);
+            const lRead = B.newLabel("dcr.r");
+            const lReadFail = B.newLabel("dcr.rf");
+            B.condBr(has, lRead, lReadFail);
+            B.startBlock(lReadFail);
+            releaseR();
+            B.terminate(`ret ptr null`);
+            B.startBlock(lRead);
+            const mk = this.kindOf(B, m);
+            const isFn = B.tmp();
+            const isJs = B.tmp();
+            B.line(`${isFn} = icmp eq i32 ${mk}, ${DK.FUNC}`);
+            B.line(`${isJs} = icmp eq i32 ${mk}, ${DK.JSVAL}`);
+            const lJs = B.newLabel("dcr.j");
+            const lJoin = B.newLabel("dcr.c");
+            const callSlot = B.slot();
+            B.entryAllocas.push(`${callSlot} = alloca i1`);
+            B.line(`store i1 ${isFn}, ptr ${callSlot}`);
+            B.condBr(isJs, lJs, lJoin);
+            B.startBlock(lJs);
+            host.declare(`declare zeroext i1 @scr_dyn_isl_typeof_is(ptr, ptr)`);
+            const jsFn = B.tmp();
+            B.line(`${jsFn} = call zeroext i1 @scr_dyn_isl_typeof_is(ptr ${m}, ptr ${host.cstr("function")})`);
+            B.line(`store i1 ${jsFn}, ptr ${callSlot}`);
+            B.br(lJoin);
+            B.startBlock(lJoin);
+            const callable = B.tmp();
+            B.line(`${callable} = load i1, ptr ${callSlot}`);
+            const lCallable = B.newLabel("dcr.fc");
+            const lBad = B.newLabel("dcr.fb");
+            B.condBr(callable, lCallable, lBad);
+            B.startBlock(lBad);
+            setPath(f.name, "0");
+            B.line(`call void @scr_dyn_check_fail(ptr ${pathSlot}, ptr ${fieldWant}, ptr ${m})`);
+            host.declare(`declare void @scr_dyn_release(ptr)`);
+            B.line(`call void @scr_dyn_release(ptr ${m})`);
+            releaseR();
+            B.terminate(`ret ptr null`);
+            B.startBlock(lCallable);
+            const adapter = this.dynBoundFuncAdapterHelper(f.type);
+            host.declare(`declare ptr @scr_closure_new(ptr, i64)`);
+            host.declare(`declare ptr @scr_box_new_obj(ptr, ptr, ptr)`);
+            host.declare(`declare void @scr_box_set_ref(ptr, ptr)`);
+            host.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
+            host.declare(`declare void @scr_dyn_release_v(ptr)`);
+            const clo = B.tmp();
+            B.line(`${clo} = call ptr @scr_closure_new(ptr @${adapter}, i64 2)`);
+            for (let ci = 0; ci < 2; ci++) {
+              const box = B.tmp();
+              const capp = B.tmp();
+              B.line(`${box} = call ptr @scr_box_new_obj(ptr @scr_dyn_retain_v, ptr @scr_dyn_release_v, ptr null)`);
+              B.line(`${capp} = getelementptr inbounds i8, ptr ${clo}, i64 ${32 + ci * 8} ; caps[${ci}]`);
+              B.line(`store ptr ${box}, ptr ${capp}`);
+              if (ci === 0) {
+                B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${m})`);
+              } else {
+                const rd = this.retainDyn(B, "%d");
+                B.line(`call void @scr_box_set_ref(ptr ${box}, ptr ${rd})`);
+              }
+            }
+            storeInto(f.name, f.type, clo);
+            continue;
+          } else {
+            m = this.objGetLit(B, "%d", f.name);
+          }
           if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
             // one IS the undefined dyn value.
@@ -893,6 +986,57 @@ export class LlDyn {
           }
           B.startBlock(lNext);
         });
+        B.line(`call void @scr_dyn_check_fail(ptr %path, ptr ${want}, ptr %d)`);
+        B.terminate(`ret ptr null`);
+        break;
+      }
+      case "promise": {
+        const rev = this.promiseDynCheckAdapterHelper(t.inner);
+        const kd = this.kindOf(B, "%d");
+        const isNative = B.tmp();
+        const isJs = B.tmp();
+        B.line(`${isNative} = icmp eq i32 ${kd}, ${DK.PROMISE}`);
+        B.line(`${isJs} = icmp eq i32 ${kd}, ${DK.JSVAL}`);
+        const lNative = B.newLabel("dcp.n");
+        const lJs = B.newLabel("dcp.j");
+        const lFail = B.newLabel("dcp.f");
+        B.condBr(isNative, lNative, lJs);
+        B.startBlock(lNative);
+        const pp = B.tmp();
+        const p = B.tmp();
+        B.line(`${pp} = getelementptr inbounds i8, ptr %d, i64 16`);
+        B.line(`${p} = load ptr, ptr ${pp}`);
+        host.declare(`declare ptr @scr_promise_new()`);
+        host.declare(`declare void @scr_promise_race_add(ptr, ptr, ptr)`);
+        const dst = B.tmp();
+        B.line(`${dst} = call ptr @scr_promise_new()`);
+        B.line(`call void @scr_promise_race_add(ptr ${dst}, ptr ${p}, ptr @${rev})`);
+        B.terminate(`ret ptr ${dst}`);
+        B.startBlock(lJs);
+        host.declare(`declare zeroext i1 @scr_dyn_isl_is_promise(ptr)`);
+        const isPromise = B.tmp();
+        B.line(`${isPromise} = call zeroext i1 @scr_dyn_isl_is_promise(ptr %d)`);
+        const lBridge = B.newLabel("dcp.b");
+        B.condBr(isPromise, lBridge, lFail);
+        B.startBlock(lBridge);
+        host.declare(`declare ptr @scr_dyn_isl_bridge_promise(ptr)`);
+        const raw = B.tmp();
+        B.line(`${raw} = call ptr @scr_dyn_isl_bridge_promise(ptr %d)`);
+        const rawOk = B.tmp();
+        B.line(`${rawOk} = icmp ne ptr ${raw}, null`);
+        const lRaw = B.newLabel("dcp.r");
+        const lBridgeFail = B.newLabel("dcp.bf");
+        B.condBr(rawOk, lRaw, lBridgeFail);
+        B.startBlock(lBridgeFail);
+        B.terminate(`ret ptr null`); // preserve the engine exception
+        B.startBlock(lRaw);
+        const dst2 = B.tmp();
+        B.line(`${dst2} = call ptr @scr_promise_new()`);
+        B.line(`call void @scr_promise_race_add(ptr ${dst2}, ptr ${raw}, ptr @${rev})`);
+        host.declare(`declare void @scr_promise_release(ptr)`);
+        B.line(`call void @scr_promise_release(ptr ${raw})`);
+        B.terminate(`ret ptr ${dst2}`);
+        B.startBlock(lFail);
         B.line(`call void @scr_dyn_check_fail(ptr %path, ptr ${want}, ptr %d)`);
         B.terminate(`ret ptr null`);
         break;
@@ -2553,6 +2697,60 @@ export class LlDyn {
     return name;
   }
 
+  /** Reverse promise settlement: dyn payload → checked typed payload. */
+  private promiseDynCheckAdapterHelper(inner: IrType): string {
+    const key = typeKey(inner);
+    const existing = this.promiseDynCheckAdapters.get(key);
+    if (existing) return existing;
+    const name = `sc_pdc_${this.promiseDynCheckAdapters.size}`;
+    this.promiseDynCheckAdapters.set(key, name);
+    const host = this.host;
+    const B = new BlockBuilder();
+    host.declare(`declare ptr @scr_promise_payload_dyn(ptr)`);
+    host.declare(`declare void @scr_dyn_release(ptr)`);
+    host.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    const dv = B.tmp();
+    B.line(`${dv} = call ptr @scr_promise_payload_dyn(ptr %src)`);
+    const v = B.tmp();
+    B.line(`${v} = call ${this.valTy(inner)} @${this.dynCheckHelper(inner)}(ptr ${dv}, ptr null)`);
+    B.line(`call void @scr_dyn_release(ptr ${dv})`);
+    this.host.declare(`declare zeroext i1 @scr_exc_pending()`);
+    const pending = B.tmp();
+    B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+    const lBad = B.newLabel("pdc.b");
+    const lOk = B.newLabel("pdc.o");
+    B.condBr(pending, lBad, lOk);
+    B.startBlock(lBad);
+    B.line(`call void @scr_promise_reject_pending(ptr %dst)`);
+    B.terminate(`ret void`);
+    B.startBlock(lOk);
+    if (inner.kind === "f64") {
+      host.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
+      B.line(`call void @scr_promise_fulfill_f64(ptr %dst, double ${v})`);
+    } else if (inner.kind === "bool") {
+      host.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
+      B.line(`call void @scr_promise_fulfill_bool(ptr %dst, i1 ${v})`);
+    } else if (inner.kind === "string") {
+      host.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
+      B.line(`call void @scr_promise_fulfill_str(ptr %dst, ptr ${v})`);
+    } else if (inner.kind === "void") {
+      host.declare(`declare void @scr_promise_fulfill_void(ptr)`);
+      B.line(`call void @scr_promise_fulfill_void(ptr %dst)`);
+    } else {
+      const rc = vAdapters(host, inner);
+      host.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+      B.line(`call void @scr_promise_fulfill_ref(ptr %dst, ptr ${v}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(host, inner)})`);
+    }
+    B.terminate(`ret void`);
+    this.defs.push(
+      `define internal void @${name}(ptr %dst, ptr %src) ${FN_ATTRS} { ; check dyn promise payload as ${key}`,
+      B.render(),
+      `}`,
+      ``,
+    );
+    return name;
+  }
+
   /* ── the checked-dynamic function boundary (ported) ────────────────── */
 
   /** The dyn argument spelling of one static value: dyn passes through
@@ -2751,6 +2949,79 @@ export class LlDyn {
       `  %c = call ptr @scr_closure_retain_v(ptr %v)`,
       `  %r = call ptr @scr_dyn_new_func(ptr %c, ptr @${thunk}, i32 ${t.params.length}, ptr ${sigLit}, ptr %fname)`,
       `  ret ptr %r`,
+      `}`,
+      ``,
+    );
+    return name;
+  }
+
+  /** Callable record-field adapter: caps[0] function, caps[1] receiver. */
+  private dynBoundFuncAdapterHelper(t: IrType & { kind: "func" }): string {
+    const key = typeKey(t);
+    const existing = this.dynBoundFuncAdapters.get(key);
+    if (existing) return existing;
+    const name = `sc_dfbr_${this.dynBoundFuncAdapters.size}`;
+    this.dynBoundFuncAdapters.set(key, name);
+    const host = this.host;
+    const B = new BlockBuilder();
+    host.declare(`declare ptr @scr_box_get_ref(ptr)`);
+    host.declare(`declare ptr @scr_dyn_call_with_this(ptr, ptr, ptr, i64, ptr)`);
+    host.declare(`declare void @scr_dyn_release(ptr)`);
+    const cap = (i: number): string => {
+      const p = B.tmp();
+      const box = B.tmp();
+      const v = B.tmp();
+      B.line(`${p} = getelementptr inbounds i8, ptr %sc_env, i64 ${32 + i * 8}`);
+      B.line(`${box} = load ptr, ptr ${p}`);
+      B.line(`${v} = call ptr @scr_box_get_ref(ptr ${box})`);
+      return v;
+    };
+    const fnv = cap(0);
+    const recv = cap(1);
+    let argsPtr = "null";
+    const argVals: string[] = [];
+    if (t.params.length > 0) {
+      const arr = B.slot();
+      B.entryAllocas.push(`${arr} = alloca [${t.params.length} x ptr]`);
+      t.params.forEach((p, i) => {
+        const v = this.toDynExpr(B, p, `%a${i}`);
+        argVals.push(v);
+        const slotp = B.tmp();
+        B.line(`${slotp} = getelementptr inbounds [${t.params.length} x ptr], ptr ${arr}, i64 0, i64 ${i}`);
+        B.line(`store ptr ${v}, ptr ${slotp}`);
+        if (isRefCounted(p)) B.line(`call void ${releaseSym(host, p)}(ptr %a${i})`);
+      });
+      argsPtr = arr;
+    }
+    const r = B.tmp();
+    B.line(`${r} = call ptr @scr_dyn_call_with_this(ptr ${fnv}, ptr ${recv}, ptr ${argsPtr}, i64 ${t.params.length}, ptr ${host.cstr("record field")})`);
+    B.line(`call void @scr_dyn_release(ptr ${fnv})`);
+    B.line(`call void @scr_dyn_release(ptr ${recv})`);
+    for (const v of argVals) B.line(`call void @scr_dyn_release(ptr ${v})`);
+    const retTy = t.ret.kind === "void" ? "void" : this.valTy(t.ret);
+    const dummy = t.ret.kind === "void" ? "void" : retTy === "double" ? `double ${f64Lit(0)}` : retTy === "i1" ? "i1 false" : "ptr null";
+    this.pendingBail(B, "dfbr", () => {}, dummy);
+    if (t.ret.kind === "void") {
+      B.line(`call void @scr_dyn_release(ptr ${r})`);
+      B.terminate(`ret void`);
+    } else if (t.ret.kind === "dyn") {
+      B.terminate(`ret ptr ${r}`);
+    } else if (t.ret.kind === "jsval") {
+      host.declare(`declare ptr @scr_jsval_from_dyn(ptr)`);
+      const out = B.tmp();
+      B.line(`${out} = call ptr @scr_jsval_from_dyn(ptr ${r})`);
+      B.line(`call void @scr_dyn_release(ptr ${r})`);
+      B.terminate(`ret ptr ${out}`);
+    } else {
+      const out = B.tmp();
+      B.line(`${out} = call ${this.valTy(t.ret)} @${this.dynCheckHelper(t.ret)}(ptr ${r}, ptr null)`);
+      B.line(`call void @scr_dyn_release(ptr ${r})`);
+      B.terminate(`ret ${this.valTy(t.ret)} ${out}`);
+    }
+    const params = ["ptr %sc_env", ...t.params.map((p, i) => `${this.valTy(p)} %a${i}`)].join(", ");
+    this.defs.push(
+      `define internal ${retTy === "i1" ? "zeroext i1" : retTy} @${name}(${params}) ${FN_ATTRS} { ; bound dyn record field to ${key}`,
+      B.render(),
       `}`,
       ``,
     );

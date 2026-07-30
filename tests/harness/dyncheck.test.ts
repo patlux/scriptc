@@ -470,6 +470,60 @@ console.log(total);
     expect(r.stdout).toBe("5050\n");
   });
 
+  /* ── callable structural-record boundary ─────────────────────────── */
+
+  test("callable record reports a missing required field at its key path", async () => {
+    const r = await compileAndRun(
+      "dyn-record-missing-callable",
+      `type Ctx = { env: (name: unknown) => Promise<string | undefined>; fileExists: (path: unknown) => Promise<boolean> };
+const u: unknown = { fileExists: async () => true };
+const ctx = u as Ctx;
+console.log("unreachable");
+void ctx;
+`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("Uncaught TypeError: expected function at $.env, got undefined");
+  });
+
+  test("callable record reports a non-callable required field at its key path", async () => {
+    const r = await compileAndRun(
+      "dyn-record-wrong-callable",
+      `type Ctx = { env: (name: unknown) => Promise<string | undefined>; fileExists: (path: unknown) => Promise<boolean> };
+const u: unknown = { env: 3, fileExists: async () => true };
+const ctx = u as Ctx;
+console.log("unreachable");
+void ctx;
+`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("Uncaught TypeError: expected function at $.env, got number");
+  });
+
+  test("callable record rejects a lying async fulfillment catchably", async () => {
+    const r = await compileAndRun(
+      "dyn-record-promise-result",
+      `type Ctx = { env: (name: unknown) => Promise<string | undefined>; fileExists: (path: unknown) => Promise<boolean> };
+async function wrong(): Promise<unknown> { return 42; }
+async function yes(): Promise<boolean> { return true; }
+function opaque(value: unknown): unknown { return value; }
+async function main(): Promise<void> {
+  const u = opaque({ env: wrong, fileExists: yes });
+  const ctx = u as Ctx;
+  try {
+    await ctx.env("TOKEN");
+    console.log("unreachable");
+  } catch (error) {
+    console.log(error instanceof TypeError, error instanceof Error ? error.message : String(error));
+  }
+}
+main();
+`,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("true expected string | undefined at $, got number");
+  });
+
   test("a lying `any` into a typed slot throws catchably where Node proceeds silently", async () => {
     // The static-any lane's exit stance (the checked cast's rule applied
     // to implicit any→typed flows): Node assigns the mismatched value and

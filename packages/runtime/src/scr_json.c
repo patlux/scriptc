@@ -965,6 +965,28 @@ bool scr_dyn_isl_is_error(const ScrDyn *d) {
   return d->kind == SCR_DYN_JSVAL && scr_dyn_jsval_ops()->is_error(d->v.jsval.cell);
 }
 
+bool scr_dyn_isl_is_promise(const ScrDyn *d) {
+  return d->kind == SCR_DYN_JSVAL && scr_dyn_jsval_ops()->is_promise(d->v.jsval.cell);
+}
+
+ScrPromise *scr_dyn_isl_bridge_promise(const ScrDyn *d) {
+  return d->kind == SCR_DYN_JSVAL ? scr_dyn_jsval_ops()->bridge_dyn_promise(d->v.jsval.cell) : NULL;
+}
+
+ScrDyn *scr_dyn_record_field(const ScrDyn *d, const char *key, size_t key_len) {
+  if (d->kind == SCR_DYN_OBJ) {
+    ScrDyn *m = scr_dyn_obj_get(d, key, key_len);
+    return scr_dyn_retain(m ? m : scr_dyn_undefined());
+  }
+  if (d->kind == SCR_DYN_JSVAL) {
+    ScrStr *k = scr_str_new(key, key_len);
+    ScrDyn *m = scr_dyn_isl_key_get(d, k);
+    scr_str_release(k);
+    return m;
+  }
+  return NULL;
+}
+
 bool scr_dyn_isl_fence(const ScrDyn *d, const char *what) {
   if (d->kind != SCR_DYN_JSVAL) return false;
   ScrJsonBuf b;

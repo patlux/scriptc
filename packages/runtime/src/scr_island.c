@@ -1266,6 +1266,10 @@ static bool isl_dynjs_strict_eq(ScrJsval *a, ScrJsval *b) {
 }
 static bool isl_dynjs_is_array(ScrJsval *cell) { return JS_IsArray(cell->v); }
 static bool isl_dynjs_is_error(ScrJsval *cell) { return JS_IsError(cell->v); }
+static bool isl_dynjs_is_promise(ScrJsval *cell) { return JS_IsPromise(cell->v); }
+static ScrPromise *isl_dynjs_bridge_dyn_promise(ScrJsval *cell) {
+  return scr_jsval_bridge_promise(cell, SCR_ISLP_DYN);
+}
 
 static const ScrDynJsvalOps isl_dynjs_ops;
 
@@ -1551,6 +1555,8 @@ static const ScrDynJsvalOps isl_dynjs_ops = {
   isl_dynjs_strict_eq,
   isl_dynjs_is_array,
   isl_dynjs_is_error,
+  isl_dynjs_is_promise,
+  isl_dynjs_bridge_dyn_promise,
   isl_dynjs_key_get,
   isl_dynjs_key_set,
   isl_dynjs_call,
@@ -2381,6 +2387,12 @@ static JSValue isl_bridge_settle(JSContext *ctx, JSValueConst this_val, int argc
       } else {
         scr_promise_fulfill_ref(b->p, arr, scr_arr_retain_v, scr_arr_release_v, NULL);
       }
+    } else if (b->payload == SCR_ISLP_DYN) {
+      /* Engine fulfillment enters the checked-dynamic world, scalar-
+       * normalized and otherwise identity-preserving. The emitted reverse
+       * promise adapter validates it into the typed callback return. */
+      ScrDyn *d = isl_dyn_from_value(v);
+      scr_promise_fulfill_ref(b->p, d, scr_dyn_retain_v, scr_dyn_release_v, NULL);
     } else {
       scr_promise_fulfill_void(b->p);
     }
