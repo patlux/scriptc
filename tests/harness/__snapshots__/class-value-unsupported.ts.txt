@@ -7,7 +7,7 @@ class-value-unsupported.ts:4:10 - error SC2001: values of type 'typeof (Anonymou
 
 class-value-unsupported.ts:12:30 - error SC2004: uses of 'makeClass' inherit the blocker on its declaration
 
-  11 |
+  11 | // The call remains a distinct unsupported constructor value.
   12 | const unsupported: unknown = makeClass();
      |                              ^~~~~~~~~
   13 | void unsupported;

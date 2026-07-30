@@ -8,6 +8,6 @@ function makeClass() {
     }
   };
 }
-
+// The call remains a distinct unsupported constructor value.
 const unsupported: unknown = makeClass();
 void unsupported;
