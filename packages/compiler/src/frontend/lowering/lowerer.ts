@@ -50,7 +50,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canDynCheckTo, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
+import { arrayOf, BOOL, canAdaptDynCallableRecordTo, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
 import { type DynamicImportResolution, type NpmBuiltinUse, type NpmLazyTrap } from "../npm.js";
 import { provenanceActive } from "../provenance-registry.js";
 import {
@@ -3028,13 +3028,15 @@ export class Lowerer {
       if (expected.kind === "dyn") {
         return { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc };
       }
-      // The narrow structural callable-record exit: preserve the engine
-      // object as a JSVAL-backed dyn root, then use the same required-key,
-      // callability, receiver-binding, and return-checking boundary as a
-      // native dyn object. No other record shape joins the island exit set.
+      // The narrow structural callable-record exit: preserve a qualifying
+      // engine object as a JSVAL-backed dyn root, then use the same
+      // required-key, callability, receiver-binding, and return-checking
+      // boundary as a native dyn object. Ordinary JSON records — including
+      // dynamic-import namespace composites — retain the established
+      // jsExit bridge below rather than entering the callable adapter.
       if (
         expected.kind === "record" &&
-        canDynCheckTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id))
+        canAdaptDynCallableRecordTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id))
       ) {
         return {
           kind: "dynCheck",
@@ -3145,7 +3147,7 @@ export class Lowerer {
         canAdaptDynFuncTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id));
       const callableRecordOk =
         expected.kind === "record" &&
-        canDynCheckTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id));
+        canAdaptDynCallableRecordTo(expected, (id) => this.shapes.get(id), (id) => this.unions.get(id));
       if (this.jsonSafe(expected) || undefArmedOk || bytesOk || errorOk || funcOk || callableRecordOk) {
         return { kind: "dynCheck", value: expr, type: expected, loc: expr.loc };
       }
@@ -4463,7 +4465,7 @@ export class Lowerer {
     if (src.kind === "jsval") {
       return (
         this.boundaryExitSafe(dst) ||
-        (dst.kind === "record" && canDynCheckTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
+        (dst.kind === "record" && canAdaptDynCallableRecordTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
       );
     }
     if (dst.kind === "dyn") return src.kind !== "dyn" && this.dynConvertible(src);
@@ -4475,7 +4477,7 @@ export class Lowerer {
       return (
         this.jsonSafe(dst) ||
         (dst.kind === "func" && canAdaptDynFuncTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id))) ||
-        (dst.kind === "record" && canDynCheckTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
+        (dst.kind === "record" && canAdaptDynCallableRecordTo(dst, (id) => this.shapes.get(id), (id) => this.unions.get(id)))
       );
     }
     if (dst.kind === "union") {

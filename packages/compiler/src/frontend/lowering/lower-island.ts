@@ -4,7 +4,7 @@
  * package boundary fences for node_modules-declared symbols. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
-import { F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
+import { BOOL, F64, IrExpr, IrStmt, IrType, JSVAL, MAX_ISLAND_CALLBACK_ARITY, STRING, VOID, canMarshalTypedFuncIntoIsland, islandPromisePayloadTag, isUnitType } from "../../ir/nodes.js";
 import { ISLAND_SURFACE, IslandFnEntry, STATIC_MATH_FNS, boundaryIntoIslandMsg } from "./surfaces.js";
 import { requiresDynamicApiDiag, requiresDynamicPackageDiag } from "../../diagnostics/diagnostic.js";
 import { isCjsJsFile, isJsSourceFile, locOf, npmPackageNameOf } from "../program.js";
@@ -343,8 +343,7 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
    * returns the exports object. Node differences (numbered divergences,
    * pinned in island.test.ts): the namespace is a SNAPSHOT taken when the
    * import resolves (Node's is live), a plain engine object (no Module
-   * toStringTag, keys still sorted like Node's, each import minting a
-   * fresh object where Node caches one), and exports with no island
+   * toStringTag, keys still sorted like Node's), and exports with no island
    * representation (classes, generic functions, un-marshalable
    * signatures) cross as trap functions that throw a pointed TypeError
    * when USED — the namespace still builds, exactly like Node still
@@ -433,7 +432,34 @@ import { PoisonError, newFnCtx, own } from "./lowerer.js";
           value,
         );
       }
-      body.push({ kind: "return", value: { kind: "jsOp", op: "objLit", args, type: JSVAL, loc }, loc });
+      const cacheTag = rawTag === "" ? "e." : rawTag.replace(/^%/, "");
+      const cacheId = `%g.${cacheTag}%dynns`;
+      const cacheReadyId = `%g.${cacheTag}%dynns-ready`;
+      L.globalsList.push(
+        { id: cacheId, name: "%dynns", type: JSVAL, mutable: true },
+        { id: cacheReadyId, name: "%dynns-ready", type: BOOL, mutable: true },
+      );
+      const cached = (): IrExpr => ({ kind: "varRef", localId: cacheId, type: JSVAL, loc });
+      body.push({
+        kind: "if",
+        cond: { kind: "varRef", localId: cacheReadyId, type: BOOL, loc },
+        then: [{ kind: "return", value: cached(), loc }],
+        else_: null,
+        loc,
+      });
+      body.push({
+        kind: "assign",
+        localId: cacheId,
+        value: { kind: "jsOp", op: "objLit", args, type: JSVAL, loc },
+        loc,
+      });
+      body.push({
+        kind: "assign",
+        localId: cacheReadyId,
+        value: { kind: "boolLit", value: true, type: BOOL, loc },
+        loc,
+      });
+      body.push({ kind: "return", value: cached(), loc });
       const ctx = L.ctx;
       L.liftedFns.push({
         name,

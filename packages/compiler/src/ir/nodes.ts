@@ -5416,10 +5416,10 @@ function canBoxBytesComposite(
 /** A type a dyn value can be VALIDATED into — the dynCheck domain:
  * JSON-safe data, bytes<u8> (a fresh copy out), the %Error extraction,
  * undefined-armed unions of JSON-safe arms, adaptable function types,
- * fixed REQUIRED callable records (the dyn→structural-record boundary,
- * including checked Promise returns), and runtime HANDLE kinds.
+ * fixed REQUIRED callable/scalar records (the dyn→structural-record
+ * boundary, including checked Promise returns), and runtime HANDLE kinds.
  * Callable records deliberately exclude tuples, index signatures, empty
- * shapes, optional/non-function fields, and unions containing them: this
+ * shapes, optional/unsupported fields, and unions containing them: this
  * lane proves one narrow boundary rather than blanket-casting objects. */
 export function canDynCheckTo(
   t: IrType,
@@ -5430,13 +5430,7 @@ export function canDynCheckTo(
   if (t.kind === "bytes" && t.elem === "u8") return true;
   if (t.kind === "object" && t.className === "%Error") return true;
   if (t.kind === "func") return canAdaptDynFuncTo(t, getRecord, getUnion);
-  if (t.kind === "record") {
-    const shape = getRecord(t.shapeId);
-    return !!shape && !shape.tuple && !shape.indexValue && shape.fields.length > 0 &&
-      shape.fields.every(
-        (f) => f.type.kind === "func" && canAdaptDynRecordFuncTo(f.type, getRecord, getUnion),
-      );
-  }
+  if (t.kind === "record" && canAdaptDynCallableRecordTo(t, getRecord, getUnion)) return true;
   if (DYN_HANDLE_KINDS.has(t.kind)) return true;
   if (t.kind === "union") {
     const def = getUnion(t.unionId);
@@ -5499,6 +5493,38 @@ export function canAdaptDynFuncTo(
       t.ret.kind === "jsval" ||
       canDynCheckTo(t.ret, getRecord, getUnion))
   );
+}
+
+/** A fixed record boundary the checked callable adapter may consume.
+ * At least one field must be callable; every other required field must be
+ * a directly checkable scalar. This keeps ordinary JSON records on jsExit,
+ * whose island round-trip is the established bridge, while admitting API context
+ * objects that combine methods with scalar configuration. */
+export function canAdaptDynCallableRecordTo(
+  t: IrType,
+  getRecord: (shapeId: string) => IrRecordShape | undefined,
+  getUnion: (unionId: string) => IrUnionDef | undefined,
+): boolean {
+  if (t.kind !== "record") return false;
+  const shape = getRecord(t.shapeId);
+  if (!shape || shape.tuple || shape.indexValue || shape.fields.length === 0) return false;
+  let callable = false;
+  for (const field of shape.fields) {
+    if (field.type.kind === "func") {
+      if (!canAdaptDynRecordFuncTo(field.type, getRecord, getUnion)) return false;
+      callable = true;
+      continue;
+    }
+    if (
+      field.type.kind !== "f64" &&
+      field.type.kind !== "string" &&
+      field.type.kind !== "bool" &&
+      field.type.kind !== "nullT"
+    ) {
+      return false;
+    }
+  }
+  return callable;
 }
 
 /** The record-method extension of canAdaptDynFuncTo: same argument rules,

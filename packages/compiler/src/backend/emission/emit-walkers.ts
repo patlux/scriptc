@@ -6,7 +6,7 @@
  * interning ORDER is part of the emitted C, so the registries stay on
  * CEmitter and these functions only consult them through it. */
 import type { CEmitter } from "./emitter.js";
-import { DYN_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey } from "../../ir/nodes.js";
+import { canAdaptDynCallableRecordTo, DYN_HANDLE_KINDS, IrType, isRefCounted, typeEquals, typeKey } from "../../ir/nodes.js";
 import { cDecl, cStringLiteral, cType, elemAccess, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleField, mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
@@ -1159,8 +1159,11 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           d.push(`  return r;`);
           break;
         }
-        const callableShape = shape.fields.length > 0 && !shape.indexValue &&
-          shape.fields.every((f) => f.type.kind === "func");
+        const callableShape = canAdaptDynCallableRecordTo(
+          t,
+          (shapeId) => E.recordsById.get(shapeId),
+          (unionId) => E.unionsById.get(unionId),
+        );
         if (callableShape) {
           d.push(`  if (d->kind != SCR_DYN_OBJ && d->kind != SCR_DYN_JSVAL) { scr_dyn_check_fail(path, ${want}, d); return NULL; }`);
         } else {
@@ -1180,10 +1183,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
           const utag = f.type.kind === "union" ? E.undefinedArmTag(f.type) : -1;
           d.push(`  {`);
           d.push(`    ScrDynPath p = { path, ${keyLit}, 0 };`);
-          if (callableShape && f.type.kind === "func") {
-            const adapter = dynBoundFuncAdapterHelper(E, f.type);
+          if (callableShape) {
             d.push(`    ScrDyn *m = scr_dyn_record_field(d, ${keyLit}, ${keyLen});`);
             d.push(`    if (!m) { ${rel("r")}; return NULL; } /* engine getter threw */`);
+          } else {
+            d.push(`    const ScrDyn *m = scr_dyn_obj_get(d, ${keyLit}, ${keyLen});`);
+          }
+          if (callableShape && f.type.kind === "func") {
+            const adapter = dynBoundFuncAdapterHelper(E, f.type);
             d.push(`    if (!(m->kind == SCR_DYN_FUNC || (m->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(m, "function")))) {`);
             d.push(`      scr_dyn_check_fail(&p, ${fieldWant}, m); scr_dyn_release(m); ${rel("r")}; return NULL;`);
             d.push(`    }`);
@@ -1193,8 +1200,6 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             d.push(`    scr_box_set_ref(a->caps[0], m); /* ownership moves */`);
             d.push(`    scr_box_set_ref(a->caps[1], scr_dyn_retain((ScrDyn *)d));`);
             d.push(`    r->${mangleField(f.name)} = a;`);
-          } else {
-            d.push(`    const ScrDyn *m = scr_dyn_obj_get(d, ${keyLit}, ${keyLen});`);
           }
           if (callableShape && f.type.kind === "func") {
             // handled above
@@ -1209,13 +1214,14 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
             d.push(`      r->${mangleField(f.name)} = ${unit}; /* absent key -> the undefined arm */`);
             d.push(`    } else {`);
             d.push(`      r->${mangleField(f.name)} = ${E.dynCheckHelper(f.type)}(m, &p);`);
-            d.push(`      if (scr_exc_pending()) { ${rel("r")}; return NULL; }`);
+            d.push(`      if (scr_exc_pending()) { ${callableShape ? "scr_dyn_release(m); " : ""}${rel("r")}; return NULL; }`);
             d.push(`    }`);
           } else {
             d.push(`    if (!m) { scr_dyn_check_fail(&p, ${fieldWant}, NULL); ${rel("r")}; return NULL; }`);
             d.push(`    r->${mangleField(f.name)} = ${E.dynCheckHelper(f.type)}(m, &p);`);
-            d.push(`    if (scr_exc_pending()) { ${rel("r")}; return NULL; }`);
+            d.push(`    if (scr_exc_pending()) { ${callableShape ? "scr_dyn_release(m); " : ""}${rel("r")}; return NULL; }`);
           }
+          if (callableShape && f.type.kind !== "func") d.push(`    scr_dyn_release(m);`);
           d.push(`  }`);
         }
         // Index-signature shapes CAPTURE undeclared keys into the overflow

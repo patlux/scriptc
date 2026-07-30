@@ -472,6 +472,28 @@ console.log(total);
 
   /* ── callable structural-record boundary ─────────────────────────── */
 
+  test("callable/scalar record adapts methods and validates scalar fields", async () => {
+    const r = await compileAndRun(
+      "dyn-record-callable-scalar",
+      `type Ctx = { prefix: string; env: (name: unknown) => Promise<string | undefined> };
+function opaque(value: unknown): unknown { return value; }
+async function env(name: unknown): Promise<string | undefined> {
+  return "value:" + String(name);
+}
+async function main(): Promise<void> {
+  const ctx = opaque({ prefix: "ctx:", env }) as Ctx;
+  console.log(ctx.prefix, await ctx.env("TOKEN"));
+}
+main();
+`,
+      "ts",
+      true,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("ctx: value:TOKEN\n");
+    expect(r.stderr).toBe("");
+  });
+
   test("callable record reports a missing required field at its key path", async () => {
     const r = await compileAndRun(
       "dyn-record-missing-callable",

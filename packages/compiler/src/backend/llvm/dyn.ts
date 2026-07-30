@@ -22,7 +22,7 @@
  *   ScrBytes { rc +0; len +8; elem +16; data +24 }.
  *   ScrDynPath { parent, key, index } — the %ScrDynPath type. */
 import type { IrType } from "../../ir/nodes.js";
-import { DYN_HANDLE_KINDS, isRefCounted, typeKey } from "../../ir/nodes.js";
+import { canAdaptDynCallableRecordTo, DYN_HANDLE_KINDS, isRefCounted, typeKey } from "../../ir/nodes.js";
 import { mangleRecordNew, mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import { arrNewCall, elemAccess, llFieldType, releaseSym, traceAdapter, traceArg, vAdapters } from "./shapes.js";
@@ -699,8 +699,11 @@ export class LlDyn {
           B.terminate(`ret ptr %r0`);
           break;
         }
-        const callableShape = shape.fields.length > 0 && !shape.indexValue &&
-          shape.fields.every((f) => f.type.kind === "func");
+        const callableShape = canAdaptDynCallableRecordTo(
+          t,
+          (shapeId) => host.recordsById.get(shapeId),
+          (unionId) => host.unionsById.get(unionId),
+        );
         if (callableShape) {
           const kd = this.kindOf(B, "%d");
           const isObj = B.tmp();
@@ -724,7 +727,7 @@ export class LlDyn {
           const fieldWant = host.cstr(this.dynDesc(f.type));
           const utag = f.type.kind === "union" ? host.undefinedArmTag(f.type) : -1;
           let m: string;
-          if (callableShape && f.type.kind === "func") {
+          if (callableShape) {
             host.declare(`declare ptr @scr_dyn_record_field(ptr, ptr, i64)`);
             m = B.tmp();
             B.line(`${m} = call ptr @scr_dyn_record_field(ptr %d, ptr ${host.cstr(f.name)}, i64 ${Buffer.byteLength(f.name, "utf8")})`);
@@ -737,6 +740,10 @@ export class LlDyn {
             releaseR();
             B.terminate(`ret ptr null`);
             B.startBlock(lRead);
+          } else {
+            m = this.objGetLit(B, "%d", f.name);
+          }
+          if (callableShape && f.type.kind === "func") {
             const mk = this.kindOf(B, m);
             const isFn = B.tmp();
             const isJs = B.tmp();
@@ -791,8 +798,6 @@ export class LlDyn {
             }
             storeInto(f.name, f.type, clo);
             continue;
-          } else {
-            m = this.objGetLit(B, "%d", f.name);
           }
           if (f.type.kind === "dyn") {
             // An `unknown` field: a present key passes through, a missing
@@ -819,6 +824,7 @@ export class LlDyn {
             const v = B.tmp();
             B.line(`${v} = call ptr @${this.dynCheckHelper(f.type)}(ptr ${m}, ptr ${pathSlot})`);
             storeInto(f.name, f.type, v);
+            if (callableShape) B.line(`call void @scr_dyn_release(ptr ${m})`);
             this.pendingBail(B, "dcr", releaseR, "ptr null");
             B.br(lj);
             B.startBlock(lj);
@@ -838,6 +844,7 @@ export class LlDyn {
             const v = B.tmp();
             B.line(`${v} = call ${this.valTy(f.type)} @${this.dynCheckHelper(f.type)}(ptr ${m}, ptr ${pathSlot})`);
             storeInto(f.name, f.type, v);
+            if (callableShape) B.line(`call void @scr_dyn_release(ptr ${m})`);
             this.pendingBail(B, "dcr", releaseR, "ptr null");
           }
         }
