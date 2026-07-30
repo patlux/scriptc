@@ -44,6 +44,16 @@ interface ObjectConstructor {
   entries<T extends object>(o: T): Array<[string, ScriptcObjectValue<T>]>;
 }
 
+/* @types/node's current BufferConstructor declaration omits the callable /
+ * constructable shape when merged through the global `Buffer` var, which
+ * makes the real Node expression `value instanceof Buffer` a checker error.
+ * This precision override restores only the runtime shape needed by the
+ * lowered instanceof surface; actual construction remains fail-closed in
+ * the frontend except for the already-supported deprecated direct forms. */
+interface BufferConstructor {
+  new(size: number): Buffer;
+}
+
 /* `parse` returns `unknown`, not the lib's `any` — the dynamic boundary. A
  * checked cast (`JSON.parse(s) as Config`) validates the value against the
  * target type at runtime and THROWS on mismatch — the mechanism that makes

@@ -3797,6 +3797,19 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       }
     }
 
+    // A direct CALL of a BufferConstructor-typed value stays fail-closed.
+    // The token represents the constructor object for identity and static
+    // member dispatch only; `Ctor(...)` / `new Ctor(...)` would need the
+    // deprecated constructor overload ladder and are intentionally not
+    // part of this value surface.
+    {
+      const calleeT = L.checker.getBaseTypeOfLiteralType(L.typeOf(expr.expression));
+      const calleeSym = calleeT.getAliasSymbol() ?? calleeT.getSymbol();
+      if (calleeSym?.name === "BufferConstructor" && L.isStdlibSymbol(calleeSym)) {
+        L.noLowering("Buffer constructor calls through values", expr);
+      }
+    }
+
     // A TYPE-GUARD call on a catch binding (`isErrnoException(err)` —
     // `(x: unknown) => x is T` with a single-return body): the caught
     // snapshot cannot cross a call boundary (KEEP NARROW), so the

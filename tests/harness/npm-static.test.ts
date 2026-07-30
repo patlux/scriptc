@@ -244,6 +244,26 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     120_000,
   );
 
+  test.for([undefined, "c"] as const)(
+    "BufferConstructor capture preserves the agent-core byteLength shape (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "buffer-constructor-cli.ts");
+      const { coverage } = analyze(entry, { npmStatic: ["buffer-constructor-static"] });
+      expect(coverage.npmStatic).toEqual([{ package: "buffer-constructor-static", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.stats.statementsFailed).toBe(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      const binary = await buildStatic(entry, ["buffer-constructor-static"], backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
   test("union receiver over an island-backed Result property analyzes without throwing", () => {
     // Exact agent-core prompt-template shape: a static package consumes a
     // typed-any parser result, narrows Result<T, Error>, then places

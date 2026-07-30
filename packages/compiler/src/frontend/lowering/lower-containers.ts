@@ -5348,7 +5348,12 @@ const DV_SETTERS: Record<string, { method: IrBytesIntrinsicMethod; le: boolean }
   export function lowerBufferStaticCall(L: Lowerer, call: ts.CallExpression,
     access: ts.PropertyAccessExpression,): IrExpr | null {
     if (call.questionDotToken || access.questionDotToken) return null;
-    if (!L.isStdlibGlobal(access.expression, "Buffer")) return null;
+    const receiverType = L.checker.getBaseTypeOfLiteralType(L.typeOf(access.expression));
+    const receiverSym = receiverType.getAliasSymbol() ?? receiverType.getSymbol();
+    const bufferCtorReceiver =
+      L.isStdlibGlobal(access.expression, "Buffer") ||
+      (receiverSym?.name === "BufferConstructor" && L.isStdlibSymbol(receiverSym));
+    if (!bufferCtorReceiver) return null;
     const member = access.name.text;
     const loc = locOf(call);
     const args = call.arguments;

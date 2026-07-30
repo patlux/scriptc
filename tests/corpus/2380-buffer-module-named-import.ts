@@ -10,3 +10,5 @@ console.log(b.length, b.readUInt8(0), b.subarray(1, 3).toString("utf8"));
 const c = Buffer.alloc(4, 7);
 console.log(c.readUInt32BE(0), Buffer.byteLength("héllo"), Buffer.isEncoding("utf8"));
 console.log(Buffer.concat([b, c]).length, Buffer.compare(b, c));
+const plain = new Uint8Array([1]);
+console.log(b instanceof Buffer, plain instanceof Buffer);

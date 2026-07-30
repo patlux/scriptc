@@ -641,6 +641,15 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       return { kind: "jsOp", op: "arrLit", args, type: JSVAL, loc };
     }
     if (ts.isTypeOfExpression(expr)) {
+      // BufferConstructor values use an internal identity closure. Fold
+      // by checker type so aliases also report Node's "function" shape.
+      {
+        const operandT = L.checker.getBaseTypeOfLiteralType(L.typeOf(expr.expression));
+        const operandSym = operandT.getAliasSymbol() ?? operandT.getSymbol();
+        if (operandSym?.name === "BufferConstructor" && L.isStdlibSymbol(operandSym)) {
+          return { kind: "strLit", value: "function", type: STRING, loc };
+        }
+      }
       // `typeof queueMicrotask` / `typeof DOMException` on a STDLIB global
       // whose declared type is callable or constructable: folds to
       // "function" BEFORE the operand lowers — the identity-token story
@@ -938,6 +947,12 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         if (L.isStdlibSymbol(sym)) {
           return { kind: "numLit", value: expr.text === "NaN" ? NaN : Infinity, type: F64, loc };
         }
+      }
+      // The Buffer constructor as a VALUE: one interned zero-capture
+      // closure. Equality is pointer identity, truthiness and typeof are
+      // naturally function-like; direct invocation is fenced in lowerCall.
+      if (stdlibGlobalNameOf(L, expr) === "Buffer") {
+        return bufferCtorClosure(L, loc);
       }
       // The primitive constructors as VALUES (`const f = String`, an
       // option table's `type: Boolean` field, `opt.type === Number`): the
@@ -9147,6 +9162,26 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
    * Folding is limited to side-effect-free operands — dropping a computed
    * operand would skip its effects, so those are rejected instead. */
   export function lowerInstanceOf(L: Lowerer, expr: ts.BinaryExpression, loc: SrcLoc): IrExpr {
+    // Buffer and Uint8Array share one bytes representation. A statically
+    // Buffer-typed value is an instance of both constructors; a plain
+    // Uint8Array is not a Buffer. Unknown/union brand tests stay out: the
+    // one bytes tag cannot distinguish those brands.
+    if (
+      (stdlibGlobalNameOf(L, expr.right) === "Buffer" || L.isStdlibGlobal(expr.right, "Uint8Array")) &&
+      ts.isIdentifier(expr.left)
+    ) {
+      const left = L.lowerExpr(expr.left);
+      if (left.type.kind === "bytes" && left.type.elem === "u8") {
+        const typeName = L.checker.typeToString(L.checker.getBaseTypeOfLiteralType(L.typeOf(expr.left)));
+        const bufferTyped = /^(?:NonShared)?Buffer(?:<|$)/.test(typeName);
+        return {
+          kind: "boolLit",
+          value: L.isStdlibGlobal(expr.right, "Uint8Array") || bufferTyped,
+          type: BOOL,
+          loc,
+        };
+      }
+    }
     // `x instanceof net.Socket` over a union with a netSocket arm — the
     // h2 compat 'connect' narrowing (lower-server.ts): a union tag test.
     const sockTest = lowerSocketInstanceOf(L, expr, loc);
@@ -11228,6 +11263,28 @@ function lowerStreamObjectProperty(L: Lowerer, expr: ts.PropertyAccessExpression
   const info = L.classes.get(recvT.className);
   if (!info || streamSidesOf(L, info) === null) return null;
   return lowerStreamProperty(L, expr, info);
+}
+
+/** BufferConstructor's identity closure. The body is unreachable because
+ * lowerCall fences invocation by checker type; it still carries a valid
+ * zero-argument ABI so the ordinary closure identity, truthiness, typeof,
+ * record/parameter flow, and RC machinery apply without a new IR kind. */
+function bufferCtorClosure(L: Lowerer, loc: SrcLoc): IrExpr {
+  const fnT = funcOf([], VOID);
+  let fnName = L.bufferCtorFn;
+  if (!fnName) {
+    fnName = "%builtin.Buffer";
+    L.bufferCtorFn = fnName;
+    L.liftedFns.push({
+      name: fnName,
+      params: [],
+      returnType: VOID,
+      locals: [],
+      body: [{ kind: "return", value: null, loc }],
+      loc,
+    });
+  }
+  return { kind: "closure", fnName, captures: [], type: fnT, loc };
 }
 
 /** The primitive-constructor closure (`String`/`Number`/`Boolean` as a

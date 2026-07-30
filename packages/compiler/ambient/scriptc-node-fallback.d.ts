@@ -457,6 +457,7 @@ interface Buffer<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> extends
   readIntLE(offset: number, byteLength: number): number;
 }
 interface BufferConstructor {
+  new(size: number): Buffer;
   from(data: string, encoding?: BufferEncoding): Buffer;
   /* The ArrayBuffer form is the VIEW construction: x.buffer with an
    * optional byte offset/length shares x's storage (the subarray rule). */

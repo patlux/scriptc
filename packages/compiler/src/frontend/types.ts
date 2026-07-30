@@ -746,6 +746,21 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       );
     }
   }
+  // Node's Buffer constructor as a VALUE. One zero-capture closure is its
+  // identity token: references can flow through records/parameters,
+  // compare by pointer identity, stay truthy, and answer typeof
+  // "function". Calls on BufferConstructor-typed receivers still dispatch
+  // statically through the existing bytes lowerings; invoking the token as
+  // a function remains fail-closed at the call site.
+  {
+    const ctorSym = widened.getSymbol();
+    if (
+      ctorSym?.name === "BufferConstructor" &&
+      checker.declarationsOf(ctorSym).some((d) => ctx.isStdlibFile(d.getSourceFile()))
+    ) {
+      return funcOf([], VOID);
+    }
+  }
   // `symbol` and `unique symbol` (the type of `const k = Symbol(...)` —
   // getBaseTypeOfLiteralType widens unique symbols, but check both flags)
   // map to the symbol identity kind.

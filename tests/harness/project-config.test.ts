@@ -58,6 +58,20 @@ test("indexed-strict: the project's EXTRA strictness is honored — preflight fa
   expect(result.diagnostics.some((d) => d.message.includes("possibly 'undefined'"))).toBe(true);
 });
 
+test("node-types: BufferConstructor values and instanceof lower under @types/node", async () => {
+  const outDir = outDirFor("node-types-buffer-constructor");
+  const result = await compile(join(nodeTypesDir, "buffer-constructor.ts"), {
+    outPath: join(outDir, "program"),
+    outDir,
+    sanitize,
+  });
+  if (!result.ok) {
+    throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+  }
+  const { stdout } = await execFileAsync(result.binaryPath, [], { encoding: "utf8" });
+  expect(stdout).toBe("true true false\n");
+});
+
 test("node-types: the supported process surface lowers statically under @types/node", async () => {
   const outDir = outDirFor("node-types");
   const result = await compile(join(nodeTypesDir, "argv-env.ts"), {

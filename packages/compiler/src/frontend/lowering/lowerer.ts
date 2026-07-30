@@ -941,6 +941,8 @@ export class Lowerer {
    * here by name so every reference is the SAME zero-capture closure and
    * `opt.type === String` is JS identity (see primitiveCtorClosure). */
   readonly primitiveCtorFns = new Map<string, string>();
+  /** BufferConstructor's identity closure, interned once per program. */
+  bufferCtorFn: string | null = null;
   /** Optional-chain lowering state. While a chain body lowers, the guarded
    * receiver NODE reads as a chainRecv (typed by the narrowed arm) instead
    * of re-lowering, its checker type reads non-nullish (typeOf), and the
