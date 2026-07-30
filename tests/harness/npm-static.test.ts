@@ -183,6 +183,27 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     120_000,
   );
 
+  test("union receiver over an island-backed Result property analyzes without throwing", () => {
+    // Exact agent-core prompt-template shape: a static package consumes a
+    // typed-any parser result, narrows Result<T, Error>, then places
+    // parsed.error.message in an object literal. The receiver VALUE is an
+    // engine handle (jsval) although the checker still reports the Error
+    // union arm; lowerUnionProperty must keep the handle and read in the
+    // engine rather than asserting a tagged-union representation.
+    const entry = join(pilotRoot, "union-receiver-cli.ts");
+    const { coverage } = analyze(entry, {
+      dynamic: true,
+      npmStatic: ["union-receiver-static", "union-receiver-parser"],
+    });
+    expect(coverage.preflightFailed).toBe(false);
+    expect(coverage.npmStatic).toEqual([
+      { package: "union-receiver-static", status: "static" },
+      { package: "union-receiver-parser", status: "static" },
+    ]);
+    expect(coverage.diagnostics.every((d) => d.code !== "SC9001")).toBe(true);
+    expect(coverage.stats.statementsTotal).toBeGreaterThan(0);
+  }, 120_000);
+
   test.for([undefined, "c"] as const)(
     "default-object npm package preserves retryCount presence (%s backend)",
     async (backend) => {
