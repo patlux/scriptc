@@ -1154,11 +1154,10 @@ export class Lowerer {
    * The checker symbol is shared when one source body is monomorphized; the
    * IR local is not. Module-scope vars live in globalsBySymbol instead. */
   readonly hoistedVarsByCtx = new WeakMap<FnCtx, Map<ts.Symbol, IrLocal>>();
-  /** Per-file `var` module globals whose type carries an undefined arm:
-   * lowerFileInit assigns them the interned undefined right after the
-   * run-once guard — JS hoists module vars to `undefined` at entry, so a
-   * function called above the declaration statement reads that, never a
-   * NULL slot. Filled by collectGlobals. */
+  /** Per-file `var` module globals. Their storage type always carries the
+   * ECMAScript entry `undefined`; lowerFileInit assigns that value right
+   * after the run-once guard, before any source statement. Filled by
+   * collectGlobals. */
   readonly varGlobalEntryInits = new Map<ts.SourceFile, IrGlobal[]>();
 
   get ctx(): FnCtx {
@@ -7009,11 +7008,9 @@ export class Lowerer {
     if (blame && predeclareForwardFnDecl(this, symbol)) {
       return this.resolveKey(symbol, blame);
     }
-    // The `var` twin: a reference above the `var` statement (a direct read
-    // tsc allowed because the type carries undefined, or a nested function
-    // capturing the binding early). JS reads undefined there — never a TDZ
-    // error — so only undefined-armed types predeclare; the rest land on
-    // rejectUnresolvedSymbol's named fence.
+    // The `var` twin: a reference above the `var` statement, including a
+    // deferred closure/class-field initializer. JS reads the function- or
+    // module-entry undefined until the source-order assignment executes.
     if (blame && predeclareForwardVar(this, symbol)) {
       return this.resolveKey(symbol, blame);
     }
@@ -7077,20 +7074,6 @@ export class Lowerer {
             `the generic-signature binding '${name}' (its type keeps type parameters and the declaration has no initializer — no function body exists to monomorphize, so nothing can pin a concrete signature)`,
           );
         }
-      }
-    }
-    // An unresolved reference to a LATER `var` whose predeclare was
-    // refused: the reads Node would serve before the declaration's
-    // assignment are `undefined`, and this binding's type has no slot for
-    // that value — name the shape instead of the generic no-lowering text.
-    if (symbol) {
-      const d = this.checker.valueDeclarationOf(symbol);
-      if (d && ts.isVariableDeclaration(d) && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.BlockScoped) === 0) {
-        this.unsupported(
-          "SC1030",
-          node,
-          `the reference to '${name}' above its 'var' declaration (a read there would be 'undefined', which the binding's type cannot hold — annotate it '| undefined' or move the declaration up)`,
-        );
       }
     }
     this.unsupported("SC1090", node, fallback);

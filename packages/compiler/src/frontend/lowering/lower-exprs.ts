@@ -2256,7 +2256,80 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       return expr;
     }
     if (expr.type.kind !== "union") return expr;
-    const narrowed = L.mapTypeOf(L.typeOf(node));
+    let narrowed = L.mapTypeOf(L.typeOf(node));
+    // A `var` slot is physically `T | undefined` even when the checker
+    // reports its declaration-site type as bare T. A DIRECT lexical read
+    // above the declaration must retain that union (the value is exactly
+    // undefined). Deferred bodies — closures and class field initializers
+    // — may execute later, so their checker flow type continues to drive
+    // extraction; explicitly undefined-armed declarations remain unions
+    // there and model both call times.
+    if (ts.isIdentifier(node)) {
+      const symbol = L.checker.getSymbolAtLocation(node);
+      const decl = symbol ? L.checker.valueDeclarationOf(symbol) : undefined;
+      const declared = decl && ts.isVariableDeclaration(decl)
+        ? L.mapTypeOf(decl.type ? L.checker.getTypeFromTypeNode(decl.type) : L.typeOf(decl.initializer ?? decl))
+        : null;
+      // Once flow has narrowed a hoisted var to its declared non-undefined
+      // arm, use that arm for ordinary post-assignment reads. The IR slot
+      // remains widened; the bridge below emits the union extraction.
+      if (declared?.kind !== "union" && narrowed?.kind === "union") narrowed = declared;
+      if (
+        decl && ts.isVariableDeclaration(decl) &&
+        (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.BlockScoped) === 0 &&
+        node.getStart(node.getSourceFile()) < decl.getStart(decl.getSourceFile())
+      ) {
+        const ownerFunction = (start: ts.Node): ts.SignatureDeclaration | null => {
+          for (let p: ts.Node | undefined = start.parent; p !== undefined && !ts.isSourceFile(p); p = p.parent) {
+            if (ts.isFunctionLike(p)) return p;
+          }
+          return null;
+        };
+        let inFieldInitializer = false;
+        for (let p = node.parent; p !== undefined && !ts.isFunctionLike(p) && !ts.isSourceFile(p); p = p.parent) {
+          if (ts.isPropertyDeclaration(p)) {
+            inFieldInitializer = true;
+            break;
+          }
+        }
+        const deferred = inFieldInitializer || ownerFunction(node) !== ownerFunction(decl);
+        if (!deferred) narrowed = expr.type;
+      }
+      // A declaration nested in conditional/loop/switch/try control does
+      // not necessarily assign the hoisted slot. Reads after that control
+      // but outside it must retain undefined (the classic `if (c) { var x
+      // = 1 } return x` shape). Reads still inside the same control region
+      // keep the checker's ordinary narrowing, preserving loop-body uses.
+      if (decl && ts.isVariableDeclaration(decl) && (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.BlockScoped) === 0) {
+        let control: ts.Node | null = null;
+        for (let p = decl.parent; p !== undefined && !ts.isFunctionLike(p) && !ts.isSourceFile(p); p = p.parent) {
+          if (
+            ts.isForStatement(p) && p.initializer === decl.parent && decl.initializer !== undefined
+          ) {
+            continue; // the for initializer executes before the first test
+          }
+          if (
+            ts.isIfStatement(p) || ts.isForStatement(p) || ts.isForInStatement(p) ||
+            ts.isForOfStatement(p) || ts.isWhileStatement(p) || ts.isDoStatement(p) ||
+            ts.isSwitchStatement(p) || ts.isTryStatement(p)
+          ) {
+            control = p;
+            break;
+          }
+        }
+        if (control !== null) {
+          let inside = false;
+          for (let p: ts.Node | undefined = node; p !== undefined; p = p.parent) {
+            if (p === control) {
+              inside = true;
+              break;
+            }
+            if (ts.isFunctionLike(p) || ts.isSourceFile(p)) break;
+          }
+          if (!inside) narrowed = expr.type;
+        }
+      }
+    }
     // `Array.isArray(u)` on a `string | readonly string[]` union: the lib
     // predicate narrows the READONLY arm to `any[]` (tsc's readonly-array
     // quirk), which maps to the island's array-of-handles (or nothing) —

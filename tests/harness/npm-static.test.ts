@@ -248,6 +248,30 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     }
   });
 
+  test("transitive compact class vars keep one hoisted module slot and source-order assignment", () => {
+    const entry = join(pilotRoot, "transitive-class-cli.ts");
+    const load = loadProgram(entry, { npmStatic: ["transitive-class-consumer"] });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder);
+      expect(lowered.diagnostics).toEqual([]);
+      const module = lowered.module;
+      expect(module).not.toBeNull();
+      if (module === null) throw new Error("transitive class fixture produced no IR module");
+      expect(validateModule(module)).toEqual([]);
+      const globals = module.globals.filter((g) => g.name === "CompactBase");
+      expect(globals).toHaveLength(1);
+      expect(globals[0]!.type.kind).toBe("union");
+      const assigns = module.functions.flatMap((fn) =>
+        fn.body.filter((stmt) => stmt.kind === "assign" && stmt.localId === globals[0]!.id),
+      );
+      // undefined at module entry, then the class value at the declaration.
+      expect(assigns).toHaveLength(2);
+    } finally {
+      load.dispose();
+    }
+  });
+
   test("imported compact class bases stay fully static", () => {
     const entry = join(pilotRoot, "imported-base-class-cli.ts");
     const packages = ["class-derived-static", "class-base-static"];

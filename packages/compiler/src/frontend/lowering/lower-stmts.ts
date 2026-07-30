@@ -393,9 +393,13 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
    * the binding name, with the JS-source fallbacks every mutable binding
    * takes (an empty-object-literal type is checked-dynamic because tsc
    * admits ANY later assignment to it; an unmappable strict type in a JS
-   * file rides the dyn fallback). Null when no static type can hold the
-   * binding. */
-  function varBindingType(L: Lowerer, nameNode: ts.Identifier): IrType | null {
+   * file rides the dyn fallback). Every var slot also admits `undefined`:
+   * ECMAScript initializes the binding at function/module entry, before
+   * any declaration statement executes. Reads after an assignment narrow
+   * back through the checker's flow type; reads in the hoisting window
+   * retain the undefined arm. Null when no static type can hold either the
+   * declared value or that mandatory entry state. */
+  export function varBindingType(L: Lowerer, nameNode: ts.Identifier): IrType | null {
     let type = L.mapTypeOf(L.typeOf(nameNode));
     if (type?.kind === "record" && isJsSourceFile(nameNode.getSourceFile())) {
       const shape = L.shapes.get(type.shapeId);
@@ -414,7 +418,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
         type;
     }
     if (!type || type.kind === "void") return null;
-    return type;
+    return L.withUndefinedArmOf(type);
   }
 
 /** `var` declarations hoist to their FUNCTION: the binding exists across
@@ -426,11 +430,10 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
    * (never popped by block exits) whose `varDecl` is PUSHED into the
    * function-root statement list at the current position — everything
    * already lowered never referenced the symbol (resolution would have
-   * found it), so the position is observationally function entry. Types
-   * with an undefined arm initialize to the interned undefined (JS's
-   * hoisted value — reads before the first assignment are `undefined`, and
-   * tsc's flow analysis rejects such reads for every OTHER type); the rest
-   * start empty, their pre-assignment reads impossible by that analysis.
+   * found it), so the position is observationally function entry. Every
+   * slot carries an undefined arm and initializes to that arm: JS exposes
+   * the value to closures and deferred class-field initializers regardless
+   * of whether the checker's declaration-site type included undefined.
    * A `var` merging with a PARAMETER of the same name (one symbol in JS
    * and in tsc's binder) resolves to the parameter's slot — `var x = 2`
    * simply overwrites the argument, exactly Node. The source declaration
@@ -461,6 +464,7 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     // trap); everything else rides unassignedSlotInit (interned union arm,
     // engine undefined for jsval).
     const wrapped = type.kind === "dyn" ? dynUndefinedExpr(locOf(nameNode)) : L.unassignedSlotInit(type, locOf(nameNode));
+    if (!wrapped) throw new Error("lowerer bug: hoisted var type cannot hold undefined");
     root.out.push({ kind: "varDecl", localId: local.id, init: wrapped, loc: locOf(nameNode) });
     L.hoistedVars().set(symbol, local);
     return local;
@@ -468,19 +472,13 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
 
 /** The forward twin of hoistVarBinding, entered from resolution failure: a
    * reference to a `var` whose declaration statement has not lowered yet —
-   * a read/write lexically above the declaration in the same function
-   * (legal under tsc exactly when the type carries `undefined`), or a
-   * nested function created above it that captures the binding. JS gives
-   * such reads `undefined`, never a TDZ error, so the hoisted slot must
-   * hold `undefined` from function entry — which is only honest for
-   * undefined-armed union types (the interned arm) and checked-dynamic
-   * bindings (the dyn undefined). Everything else returns false
-   * and the reference lands on the named fence in rejectUnresolvedSymbol:
-   * a slot of a narrower type has no bit pattern for the `undefined` Node
-   * would yield if the capture ran early, and guessing "it won't" is the
-   * silent-wrong-output sin. */
+   * a direct read/write or a deferred closure/class-field initializer that
+   * captures the binding. The slot type is the declaration's runtime type
+   * widened with undefined, so it can always carry ECMAScript's entry value
+   * without guessing whether the deferred read runs before or after the
+   * source-order assignment. */
   export function predeclareForwardVar(L: Lowerer, symbol: ts.Symbol): boolean {
-    if (L.hoistedVars().has(symbol)) return false; // would have resolved
+    if (L.hoistedVars().has(symbol) || L.globalsBySymbol.has(symbol)) return false; // would resolve outside locals
     const decl = L.checker.valueDeclarationOf(symbol);
     if (!decl || !ts.isVariableDeclaration(decl) || !isVarDeclared(decl)) return false;
     const nameNode = ts.isIdentifier(decl.name) ? decl.name : null;
@@ -501,14 +499,10 @@ export function provenanceElidedConstDecl(L: Lowerer, decl: ts.VariableDeclarati
     }
     if (!owner) return false;
     const ctx = owner.ctx;
-    // Only a slot that can hold `undefined` can carry the pre-
-    // initialization reads: an undefined-armed union (the interned arm),
-    // a checked-dynamic binding (the dyn undefined), or a jsval 'any'
-    // binding (the engine's undefined).
     const type = varBindingType(L, nameNode);
     if (!type) return false;
     const wrapped = type.kind === "dyn" ? dynUndefinedExpr(locOf(decl)) : L.unassignedSlotInit(type, locOf(decl));
-    if (!wrapped) return false;
+    if (!wrapped) throw new Error("lowerer bug: forward var type cannot hold undefined");
     const root = L.activeStmtLists.find((e) => e.ctx === ctx)!;
     const name = nameNode.text;
     const count = ctx.localCounters.get(name) ?? 0;
@@ -2925,7 +2919,8 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         if (wrapped) return { kind: "assign", localId: g.id, value: wrapped, loc: locOf(decl) };
         return null;
       }
-      const init = L.lowerExprExpecting(decl.initializer, g.type);
+      let init = L.lowerExpr(decl.initializer);
+      init = L.coerceInto(decl.initializer, init, g.type);
       return { kind: "assign", localId: g.id, value: init, loc: locOf(decl) };
     }
 
@@ -2950,7 +2945,8 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     if (isVarDeclared(decl) && declSymbol) {
       const local = hoistVarBinding(L, declSymbol, decl.name);
       if (!decl.initializer) return null;
-      const init = L.lowerExprExpecting(decl.initializer, local.type);
+      let init = L.lowerExpr(decl.initializer);
+      init = L.coerceInto(decl.initializer, init, local.type);
       return { kind: "assign", localId: local.id, value: init, loc: locOf(decl) };
     }
 
@@ -4391,20 +4387,39 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
     const op = expr.operator === ts.SyntaxKind.PlusPlusToken ? "+" : "-";
     const readTarget: IrExpr = { kind: "varRef", localId: target.id, type: target.type, loc };
     // JS any-origin targets: check the read to number, convert the
-    // result back into the dyn slot (the compound-assign stance).
+    // result back into the dyn slot (the compound-assign stance). Hoisted
+    // numeric vars use a physical number|undefined slot; the checker only
+    // admits ++/-- where flow proved the number arm, so extract it here.
     const dynTarget = target.type.kind === "dyn" && isJsSourceFile(expr.getSourceFile());
-    if (target.type.kind !== "f64" && !dynTarget) {
+    const numericUnion = target.type.kind === "union" ? target.type : null;
+    const numericVar =
+      numericUnion !== null &&
+      L.unions.get(numericUnion.unionId)?.arms.some((a) => a.kind === "f64") === true &&
+      L.unions.get(numericUnion.unionId)?.arms.some((a) => a.kind === "undefinedT") === true;
+    if (target.type.kind !== "f64" && !dynTarget && !numericVar) {
       L.unsupported("SC1090", expr.operand, "increment/decrement of non-number targets");
     }
+    const numericRead: IrExpr = numericVar
+      ? {
+          kind: "unionNarrow",
+          unionId: numericUnion!.unionId,
+          tag: L.armTag(numericUnion!.unionId, F64),
+          value: readTarget,
+          type: F64,
+          loc,
+        }
+      : dynTarget ? { kind: "dynCheck", value: readTarget, type: F64, loc } : readTarget;
     const computed: IrExpr = {
       kind: "bin",
       op,
-      left: dynTarget ? { kind: "dynCheck", value: readTarget, type: F64, loc } : readTarget,
+      left: numericRead,
       right: { kind: "numLit", value: 1, type: F64, loc },
       type: F64,
       loc,
     };
-    const value: IrExpr = dynTarget ? { kind: "dynFrom", value: computed, type: DYN, loc } : computed;
+    const value: IrExpr = dynTarget
+      ? { kind: "dynFrom", value: computed, type: DYN, loc }
+      : numericVar ? L.coerceInto(expr, computed, target.type) : computed;
     return { kind: "assign", localId: target.id, value, loc };
   }
 
@@ -4428,8 +4443,24 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
         type: JSVAL, loc,
       };
       value = L.coerceInto(expr, wrapped, target.type);
-    } else if (compound === "+" && target.type.kind === "string") {
-      value = { kind: "strConcat", left: read, right: L.ensureString(rhs, expr.right), type: STRING, loc };
+    } else if (
+      compound === "+" &&
+      (target.type.kind === "string" ||
+        (target.type.kind === "union" &&
+          L.unions.get(target.type.unionId)?.arms.some((a) => a.kind === "string") === true))
+    ) {
+      const left = target.type.kind === "string"
+        ? read
+        : {
+            kind: "unionNarrow" as const,
+            unionId: target.type.unionId,
+            tag: L.armTag(target.type.unionId, STRING),
+            value: read,
+            type: STRING,
+            loc,
+          };
+      const concatenated: IrExpr = { kind: "strConcat", left, right: L.ensureString(rhs, expr.right), type: STRING, loc };
+      value = target.type.kind === "union" ? L.coerceInto(expr, concatenated, target.type) : concatenated;
     } else if (target.type.kind === "f64" && rhs.type.kind === "f64") {
       value = { kind: "bin", op: compound, left: read, right: rhs, type: F64, loc };
     } else if (

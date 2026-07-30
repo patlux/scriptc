@@ -188,12 +188,10 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
   // reuse. (Spread, computed keys, getters/setters and `this` in
   // object-literal methods remain rejected via SC1090.)
   // SC1024 (arrays) shipped — code retired, do not reuse.
-  // `var` declarations shipped (function-scope hoisting, redeclaration
-  // merge, the shared-binding loop capture semantics). SC1030's remaining
-  // uses are the var edges with no honest lowering — each names its shape
-  // and remedy inline (a reference above the declaration whose early reads
-  // would be an unrepresentable `undefined`; `var` loop bindings in
-  // `for await`).
+  // `var` declarations shipped (function/module entry initialized to
+  // undefined, source-order initializer assignment, redeclaration merge,
+  // deferred closure/class-field reads, shared loop capture semantics).
+  // SC1030's remaining uses are var loop bindings in `for await`.
   SC1030: {
     feature: "var declarations",
     milestone: "later",

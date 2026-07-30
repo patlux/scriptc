@@ -15,7 +15,7 @@ import { BOOL, DYN, IrClassDef, IrExpr, IrFunction, IrGlobal, IrRecordShape, IrS
 import { ENTRY_NAME, PoisonError, boundIdentifiersOf, dynFallbackType, dynUndefinedExpr, importCallHandleType, newFnCtx, uncheckedOverloadHandleCall } from "./lowerer.js";
 import { builtinMemberRequireDecl, builtinNamespaceDestructureModuleOf, createRequireBindingDecl, createRequireNamespaceDecl, createRequireSpecOf, isPromisifyCall } from "./lower-builtins.js";
 import { bindingContextualGenericFnNodeOf, bindingGenericFnAliasInfoOf, bindingGenericFnInfoOf, bindingGenericFnNodeOf, deadUnmappableBinding, implicitLocalFnInfoOf, implicitLocalFnNodeOf, nullishGenericBindingUnitOf } from "./lower-calls.js";
-import { isVarDeclared, provenanceElidedConstDecl } from "./lower-stmts.js";
+import { isVarDeclared, provenanceElidedConstDecl, varBindingType } from "./lower-stmts.js";
 import { streamClassAliasDecl } from "./lower-stream.js";
 import { stdlibGlobalAliasDecl } from "./surfaces.js";
 import { collectNamespaceStmt, nsPathPrefix, trapDeclRootOf } from "./lower-namespaces.js";
@@ -47,6 +47,42 @@ export interface FileParts {
     const files = [...declarationRoots, ...ordered];
     return files.map((sf) => {
       const fp: FileParts = { sf, fnDecls: [], classDecls: [], classExprDecls: [], topStmts: [] };
+      // A selected compact class expression can name sibling compact
+      // classes from its fields/methods (`var Marked = class { Parser =
+      // Parser; Lexer = Lexer }`). Those names are live `var` bindings,
+      // not type-only shape references: admit the same-file dependency
+      // closure so every binding gets its undefined-at-entry global and
+      // its class initializer assignment remains at the source statement.
+      // The closure is symbol-keyed (minified one-letter names are safe),
+      // source statements emit once, and unrelated package code stays out.
+      const selectedClassExprStmts = new Set<ts.VariableStatement>();
+      if (isNpmStaticClassFile(sf.fileName)) {
+        const bySymbol = new Map<ts.Symbol, { stmt: ts.VariableStatement; expr: ts.ClassExpression }>();
+        const queue: ts.ClassExpression[] = [];
+        for (const stmt of sf.statements) {
+          if (!ts.isVariableStatement(stmt) || stmt.declarationList.declarations.length !== 1) continue;
+          const decl = stmt.declarationList.declarations[0]!;
+          if (!ts.isIdentifier(decl.name) || !decl.initializer || !ts.isClassExpression(decl.initializer)) continue;
+          const symbol = L.checker.getSymbolAtLocation(decl.name);
+          if (symbol) bySymbol.set(symbol, { stmt, expr: decl.initializer });
+          if (isNpmStaticClassExpressionLocal(sf.fileName, decl.name.text)) {
+            selectedClassExprStmts.add(stmt);
+            queue.push(decl.initializer);
+          }
+        }
+        for (let at = 0; at < queue.length; at++) {
+          ts.walkPreorder(queue[at]!, (node) => {
+            if (!ts.isIdentifier(node)) return undefined;
+            const symbol = L.checker.getSymbolAtLocation(node);
+            const dependency = symbol ? bySymbol.get(symbol) : undefined;
+            if (dependency && !selectedClassExprStmts.has(dependency.stmt)) {
+              selectedClassExprStmts.add(dependency.stmt);
+              queue.push(dependency.expr);
+            }
+            return undefined;
+          });
+        }
+      }
       for (const stmt of sf.statements) {
         if (ts.isFunctionDeclaration(stmt)) fp.fnDecls.push(stmt);
         else if (
@@ -56,16 +92,14 @@ export interface FileParts {
         ) {
           fp.classDecls.push(stmt);
         }
-        else if (
-          isNpmStaticClassFile(sf.fileName) && ts.isVariableStatement(stmt) &&
-          stmt.declarationList.declarations.length === 1
-        ) {
-          const decl = stmt.declarationList.declarations[0]!;
-          if (
-            ts.isIdentifier(decl.name) && decl.initializer !== undefined &&
-            ts.isClassExpression(decl.initializer) && isNpmStaticClassExpressionLocal(sf.fileName, decl.name.text)
-          ) {
+        else if (isNpmStaticClassFile(sf.fileName) && ts.isVariableStatement(stmt)) {
+          if (selectedClassExprStmts.has(stmt)) {
+            const decl = stmt.declarationList.declarations[0]!;
+            if (!decl.initializer || !ts.isClassExpression(decl.initializer)) {
+              throw new Error("lowerer bug: selected compact class statement lost its class initializer");
+            }
             fp.classExprDecls.push(decl.initializer);
+            fp.topStmts.push(stmt);
           }
         }
         // Namespaces: ambient/type-only ones are zero-runtime and skip;
@@ -1299,6 +1333,32 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         for (const nameNode of boundIdentifiersOf(decl.name)) {
           const diagsBefore = L.diags.length;
           try {
+            // A module `var C = class {}` is both a class shape and a live
+            // mutable binding. The checker often leaves its constructor
+            // type structurally unmappable in compact JS, so register from
+            // the already-collected ClassInfo directly: classval plus the
+            // mandatory undefined entry arm. The declaration statement
+            // later assigns the one classRef in source order.
+            if (
+              isVarDeclared(decl) && ts.isIdentifier(decl.name) && nameNode === decl.name &&
+              decl.initializer !== undefined && ts.isClassExpression(decl.initializer)
+            ) {
+              const symbol = L.checker.getSymbolAtLocation(nameNode);
+              const info = symbol ? L.classBySymbol.get(symbol) : undefined;
+              if (symbol && info && !L.globalsBySymbol.has(symbol)) {
+                const type = L.withUndefinedArm({ kind: "classval", className: info.def.name });
+                const g: IrGlobal = {
+                  id: `%g.${tag}${nsPrefix}${nameNode.text}`,
+                  name: nameNode.text,
+                  type,
+                  mutable: true,
+                };
+                L.globalsBySymbol.set(symbol, g);
+                L.globalsList.push(g);
+                noteVarGlobalEntryInit(L, sf, g);
+              }
+              continue;
+            }
             // The no-ICU Segmenter factory call settles to its static
             // fallback class even though emitted JavaScript types the call
             // as any. Register that concrete class global so later method
@@ -1477,7 +1537,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
                   // exactly the local rule (uncheckedOverloadHandleCall).
                   (uncheckedOverloadHandleCall(L, decl.initializer) ? JSVAL : null))
                 : null;
-            let type = handleT ?? L.irTypeOf(nameNode);
+            let type = handleT ?? (isVarDeclared(decl) ? (varBindingType(L, nameNode) ?? L.badType(nameNode, L.typeOf(nameNode))) : L.irTypeOf(nameNode));
             // An evolving-`any` array's DERIVED file-scope binding under
             // --dynamic (`const kept = fns.filter(...)` where `fns`
             // registered array<jsval> at its `any[]` declaration): the
@@ -1571,11 +1631,8 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
             };
             L.globalsBySymbol.set(symbol, g);
             L.globalsList.push(g);
-            // Mutable checked-dynamic LET globals ride the same entry
-            // init: a closure called above the declaration statement
-            // reads the dyn undefined instead of faulting on NULL — the
-            // dyn face of let's documented pre-declaration window (Node
-            // throws the TDZ ReferenceError there).
+            // Every var global starts as undefined at module entry; dyn
+            // mutable globals retain the existing safety init too.
             if (isVarDeclared(decl) || (g.type.kind === "dyn" && g.mutable)) {
               noteVarGlobalEntryInit(L, sf, g);
             }
@@ -1618,23 +1675,15 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
     return g?.type.kind === "array" && g.type.elem.kind === "jsval";
   }
 
-/** Registers the entry-init note for a `var` module global: JS hoists
-   * module vars to `undefined` at module entry, so an undefined-armed slot
-   * must hold the interned undefined arm BEFORE the body runs (a function
-   * called above the declaration statement may read it — lowerFileInit
-   * emits the assigns right after the run-once guard). Checked-dynamic
-   * slots hold the dyn undefined the same way (a NULL dyn is a trap, not
-   * a value). Other types need nothing: tsc's flow analysis rejects their
-   * direct early reads, and closure reads share let's documented
-   * zero/NULL divergence window. */
+/** Registers the entry-init note for a module `var` global. Its storage
+   * type is widened during collection, so every registered var can and
+   * must receive ECMAScript's undefined before body evaluation. Dyn/jsval
+   * use their own undefined values; tagged unions use the interned unit
+   * arm. */
   function noteVarGlobalEntryInit(L: Lowerer, sf: ts.SourceFile, g: IrGlobal): void {
-    // 'any' globals need the entry init exactly like undefined-armed
-    // unions: tsc never guards `any` reads, so `var x: any;` is readable
-    // before any assignment and its slot must hold its world's undefined
-    // — the ENGINE's for jsval (--dynamic), the checked-dynamic tree's for dyn (static) —
-    // rather than a C-level NULL (an op or validated exit on NULL is
-    // memory-unsafe, not a TypeError).
-    if (g.type.kind !== "union" && g.type.kind !== "jsval" && g.type.kind !== "dyn") return;
+    if (g.type.kind !== "union" && g.type.kind !== "jsval" && g.type.kind !== "dyn") {
+      throw new Error("lowerer bug: module var type cannot hold undefined");
+    }
     const inits = L.varGlobalEntryInits.get(sf) ?? [];
     inits.push(g);
     L.varGlobalEntryInits.set(sf, inits);
@@ -1677,7 +1726,7 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
           const diagsBefore = L.diags.length;
           try {
             if (isJsSourceFile(sf) && !L.mapTypeOf(L.typeOf(nameNode))) continue;
-            let type = L.irTypeOf(nameNode);
+            let type = varBindingType(L, nameNode) ?? L.badType(nameNode, L.typeOf(nameNode));
             // Nested-var unit-only bindings take the unit-only union too
             // (the top-level registration's rule).
             if (type.kind === "void" && isUnitOnlyTsType(L.typeOf(nameNode))) {

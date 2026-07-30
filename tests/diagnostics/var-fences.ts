@@ -1,10 +1,9 @@
-// The var fences that remain after lowering shipped: a reference above the
-// `var` declaration whose early reads would be `undefined` — a value the
-// binding's non-undefined type cannot hold. Fenced, never guessed.
-function forwardCapture(): void {
-  const read = (): number => n; // captures n before its statement
-  console.log(read());
-  var n = 5;
-  console.log(n);
+// `var` now has full undefined-at-entry hoisting. Its remaining SC1030
+// boundary is the unsupported for-await loop-binding form.
+async function consume(): Promise<void> {
+  for await (var chunk of process.stdin) {
+    console.log(chunk.length);
+  }
 }
-forwardCapture();
+
+consume();
