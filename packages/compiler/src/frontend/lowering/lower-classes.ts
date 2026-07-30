@@ -6,7 +6,7 @@
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, DYN, F64, bytesOf, IrClassDef, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, SrcLoc, UNDEFINED_T, URL_T, VOID, arrayOf, isSupportedMapKey, isUnitType, typeEquals } from "../../ir/nodes.js";
-import { MAX_GENERIC_INSTANCES, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
+import { MAX_GENERIC_INSTANCES, bindingNeverReassigned, genericCallInstance, implicitAnyParamSymbolsOf, implicitCallInstance, implicitMonoFile, omittedArgFor, type GenericFnInfo, type ParamShape } from "./lower-calls.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
 import { cjsClassExprWholeExportOf, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeTypesPath, locOf } from "../program.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, newFnCtx, own } from "./lowerer.js";
@@ -3153,8 +3153,9 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
   }
 
 /** The EXACT class a receiver expression is statically known to BE (not
-   * merely be typed by): the class name itself, or a `const` binding
-   * whose initializer is a class expression / class name. Such receivers
+   * merely be typed by): the class name itself, or an immutable binding
+   * (`const`, or a proven never-reassigned top-level `var`/`let`) whose
+   * initializer is a class expression / class name. Such receivers
    * can never hold a subclass at runtime, so static WRITES through them
    * hit the declaring class's storage exactly (the shadowing hazards of
    * general class values don't arise). Null for everything else. */
@@ -3169,16 +3170,24 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
     // class-value write fence answers instead.
     if (direct) return direct.classDecorators?.valueGlobalId !== undefined ? null : direct;
     const decl = L.checker.valueDeclarationOf(symbol);
+    // Imported aliases of `const C = class {}` can resolve directly to the
+    // class expression's synthesized symbol instead of the variable's
+    // symbol (notably compact npm ESM output: `var C = class; export { C }`).
+    // The expression is still a once-evaluated top-level class, so collect
+    // it on demand and preserve the ordinary class-expression identity,
+    // constructor, field, and vtable story.
+    if (decl && ts.isClassExpression(decl)) return L.lowerClassExpressionInfo(decl);
     if (
       !decl || !ts.isVariableDeclaration(decl) || decl.initializer === undefined ||
-      !ts.isVariableDeclarationList(decl.parent) ||
-      (decl.parent.flags & ts.NodeFlags.Const) === 0
+      !ts.isVariableDeclarationList(decl.parent)
     ) {
       return null;
     }
+    const isConst = (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+    if (!isConst && !bindingNeverReassigned(L, symbol, decl)) return null;
     let init: ts.Expression = decl.initializer;
     while (ts.isParenthesizedExpression(init)) init = init.expression;
-    if (ts.isClassExpression(init)) return L.exprClassInfoByNode.get(init) ?? null;
+    if (ts.isClassExpression(init)) return L.lowerClassExpressionInfo(init);
     if (ts.isIdentifier(init)) {
       const initSym = L.resolveValueSymbol(init);
       const aliased = initSym ? (L.classBySymbol.get(initSym) ?? null) : null;
