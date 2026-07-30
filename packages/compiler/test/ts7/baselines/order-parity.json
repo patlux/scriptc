@@ -7930,6 +7930,126 @@
     "<repo>/tests/diagnostics/nullish-assignment.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/2652-async-iterable-for-await.ts": {
+   "order": [
+    "<repo>/tests/corpus/2652-async-iterable-for-await.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2653-async-iterable-post-close.ts": {
+   "order": [
+    "<repo>/tests/corpus/2653-async-iterable-post-close.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2654-default-object-presence.ts": {
+   "order": [
+    "<repo>/tests/corpus/2654-default-object-presence.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2664-object-enumeration-static.ts": {
+   "order": [
+    "<repo>/tests/corpus/2664-object-enumeration-static.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2665-object-enumeration-null.cjs": {
+   "order": [
+    "<repo>/tests/corpus/2665-object-enumeration-null.cjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2666-generic-string-direct-calls.ts": {
+   "order": [
+    "<repo>/tests/corpus/2666-generic-string-direct-calls.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2668-optional-computed-member-call.js": {
+   "order": [
+    "<repo>/tests/corpus/2668-optional-computed-member-call.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2669-optional-computed-member-call-island.js": {
+   "order": [
+    "<repo>/tests/corpus/2669-optional-computed-member-call-island.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2670-typed-to-unknown-boundary.ts": {
+   "order": [
+    "<repo>/tests/corpus/2670-typed-to-unknown-boundary.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2671-delete-dynamic-plain-key.ts": {
+   "order": [
+    "<repo>/tests/corpus/2671-delete-dynamic-plain-key.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2672-dyn-fn-any-adapt.mjs": {
+   "order": [
+    "<repo>/tests/corpus/2672-dyn-fn-any-adapt.mjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2673-dynamic-import-rewritten.mjs": {
+   "order": [
+    "<repo>/tests/corpus/2673-dynamic-import-rewritten.mjs"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2674-empty-record-field-reads.ts": {
+   "order": [
+    "<repo>/tests/corpus/2674-empty-record-field-reads.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2675-empty-record-js-theme.js": {
+   "order": [
+    "<repo>/tests/corpus/2675-empty-record-js-theme.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2676-union-receiver-property-matrix.ts": {
+   "order": [
+    "<repo>/tests/corpus/2676-union-receiver-property-matrix.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2677-union-receiver-island-error.js": {
+   "order": [
+    "<repo>/tests/corpus/2677-union-receiver-island-error.js"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/empty-record-field-reads.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/empty-record-field-reads.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/optional-computed-call.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/optional-computed-call.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/string-method-extraction.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/string-method-extraction.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/typed-to-unknown.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/typed-to-unknown.ts"
+   ],
+   "diags": []
   }
  }
 }
