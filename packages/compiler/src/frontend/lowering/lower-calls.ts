@@ -9,7 +9,7 @@ import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam,
 import type { IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../types.js";
-import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr } from "./lowerer.js";
+import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr, type WidthLift } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
 import { ffiBindingDiag, ffiSignatureDiag, requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
@@ -7082,32 +7082,140 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
     return helper;
   }
 
-  /** Interned `%obj.assign.<n>(t, s)` — Object.assign's per-field copy
-   * over signature-free records (every source field lands on a same-named,
-   * same-typed target field — the caller's gate): undefined-armed source
-   * fields copy behind the not-undefined guard, everything else straight,
-   * and the TARGET returns (JS's aliasing). */
-  function recordAssignHelper(L: Lowerer, targetShapeId: string, srcShapeId: string, loc: SrcLoc): string {
-    const key = `obj.assign:${targetShapeId}:${srcShapeId}`;
+  interface RecordAssignFieldPlan {
+    name: string;
+    src: IrType;
+    dst: IrType;
+    lift: WidthLift;
+    /** Static records represent absent optional properties by their
+     * undefined arm. That makes an undefined-armed SOURCE ambiguous:
+     * absent and own-present-undefined are the same runtime state, so the
+     * safe static subset skips that arm. A syntactically present literal
+     * field is handled separately below and may copy undefined exactly. */
+    skipUndefined: boolean;
+  }
+
+  interface RecordAssignPlan {
+    sourceShapeId: string;
+    fields: RecordAssignFieldPlan[];
+  }
+
+  /** Own keys known from a SIMPLE object-literal source. Optional fields
+   * need this distinction because the record layout otherwise represents
+   * both an absent key and an own-present `undefined` key by the same union
+   * arm. Null means the source's presence set is not statically knowable. */
+  function literalAssignOwnFields(node: ts.Expression): Set<string> | null {
+    let inner = node;
+    while (
+      ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) ||
+      ts.isTypeAssertion(inner) || ts.isSatisfiesExpression(inner)
+    ) {
+      inner = inner.expression;
+    }
+    if (!ts.isObjectLiteralExpression(inner)) return null;
+    const names = new Set<string>();
+    for (const prop of inner.properties) {
+      if (ts.isSpreadAssignment(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
+        return null;
+      }
+      const name = prop.name;
+      if (!name || ts.isComputedPropertyName(name)) return null;
+      if (ts.isIdentifier(name) || ts.isStringLiteral(name)) names.add(name.text);
+      else if (ts.isNumericLiteral(name)) names.add(String(Number(name.text)));
+      else return null;
+    }
+    return names;
+  }
+
+  /** The statically representable Object.assign field walk. Both shapes
+   * must be plain fixed records; every source key must already exist on the
+   * target and its value must lift into the target slot. Source declaration
+   * order is JS own-string-key order for these records. Accessors, tuples,
+   * index overflows, classes, proxies, and symbol-keyed shapes fail closed
+   * before a plan is produced. */
+  function recordAssignPlan(
+    L: Lowerer,
+    targetShapeId: string,
+    sourceShapeId: string,
+    knownOwn: Set<string> | null,
+  ): RecordAssignPlan | null {
+    const target = L.shapes.get(targetShapeId);
+    const source = L.shapes.get(sourceShapeId);
+    if (
+      !target || !source || target.tuple || source.tuple ||
+      target.indexValue || source.indexValue ||
+      shapeHasAccessorSlots(target) || shapeHasAccessorSlots(source)
+    ) {
+      return null;
+    }
+    const fields: RecordAssignFieldPlan[] = [];
+    const order = source.declaredOrder ?? source.fields.map((f) => f.name);
+    for (const name of order) {
+      if (name.startsWith("%")) return null;
+      const sf = source.fields.find((f) => f.name === name);
+      const tf = target.fields.find((f) => f.name === name);
+      if (!sf || !tf) return null;
+      const lift = L.widthLiftPlan(sf.type, tf.type);
+      if (!lift) return null;
+      const undefinedArmed = sf.type.kind === "union" && L.armTag(sf.type.unionId, UNDEFINED_T) >= 0;
+      // An aliased optional-shaped source is ambiguous: its undefined arm
+      // could mean absent (skip) or own-present undefined (write). Refuse
+      // rather than silently choose. A simple literal has a syntactic own
+      // set, so both states are exact.
+      if (undefinedArmed && knownOwn === null) return null;
+      fields.push({
+        name,
+        src: sf.type,
+        dst: tf.type,
+        lift,
+        skipUndefined: undefinedArmed && !knownOwn?.has(name),
+      });
+    }
+    return { sourceShapeId, fields };
+  }
+
+  /** Interned `%obj.assign.<n>(t, s)` — one source's own-field copy onto
+   * a fixed-record TARGET. Reads and writes stay in source declaration
+   * order, lifted values enter the existing target slots, overwrite RC is
+   * owned by recordSet's unlink-then-release emission, and the TARGET
+   * returns (identity/aliasing). */
+  function recordAssignHelper(L: Lowerer, targetShapeId: string, plan: RecordAssignPlan, loc: SrcLoc): string {
+    const presence = plan.fields.map((f) => (f.skipUndefined ? "0" : "1")).join("");
+    const key = `obj.assign:${targetShapeId}:${plan.sourceShapeId}:${presence}`;
     const existing = L.arrHofHelpers.get(key);
     if (existing) return existing;
     const helper = `%obj.assign.${L.arrHofHelpers.size}`;
     L.arrHofHelpers.set(key, helper);
-    const sShape = L.shapes.get(srcShapeId)!;
     const tT: IrType = { kind: "record", shapeId: targetShapeId };
-    const sT: IrType = { kind: "record", shapeId: srcShapeId };
+    const sT: IrType = { kind: "record", shapeId: plan.sourceShapeId };
     const tRef: IrExpr = { kind: "varRef", localId: "t.0", type: tT, loc };
     const sRef: IrExpr = { kind: "varRef", localId: "s.0", type: sT, loc };
     const body: IrStmt[] = [];
-    for (const f of sShape.fields) {
-      const get: IrExpr = { kind: "recordGet", obj: sRef, shapeId: srcShapeId, field: f.name, type: f.type, loc };
-      const set: IrStmt = { kind: "recordSet", obj: tRef, shapeId: targetShapeId, field: f.name, value: get, loc };
-      const utag = f.type.kind === "union" ? L.armTag(f.type.unionId, UNDEFINED_T) : -1;
+    for (const f of plan.fields) {
+      const raw: IrExpr = {
+        kind: "recordGet",
+        obj: sRef,
+        shapeId: plan.sourceShapeId,
+        field: f.name,
+        type: f.src,
+        loc,
+      };
+      const set: IrStmt = {
+        kind: "recordSet",
+        obj: tRef,
+        shapeId: targetShapeId,
+        field: f.name,
+        value: L.applyWidthLift(f.lift, raw, f.dst, loc),
+        loc,
+      };
+      const utag = f.skipUndefined && f.src.kind === "union"
+        ? L.armTag(f.src.unionId, UNDEFINED_T)
+        : -1;
       body.push(
-        utag >= 0 && f.type.kind === "union"
+        utag >= 0 && f.src.kind === "union"
           ? {
               kind: "if",
-              cond: { kind: "unionIsTag", unionId: f.type.unionId, tag: utag, negated: true, value: get, type: BOOL, loc },
+              cond: { kind: "unionIsTag", unionId: f.src.unionId, tag: utag, negated: true, value: raw, type: BOOL, loc },
               then: [set],
               else_: null,
               loc,
@@ -7131,6 +7239,15 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       loc,
     });
     return helper;
+  }
+
+  /** A source expression that is definitely null/undefined at runtime.
+   * Object.assign skips it, but argument evaluation still happens in its
+   * original position. */
+  function nullishAssignSource(L: Lowerer, node: ts.Expression): IrExpr | null {
+    const probed = probeLower(L, node);
+    if (probed?.type.kind !== "nullT" && probed?.type.kind !== "undefinedT") return null;
+    return L.lowerExpr(node);
   }
 
   /** The `Iterator` global's statics (ES2025 — Iterator.from, and the
@@ -7468,24 +7585,22 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
       // source, returning the target — lower-containers owns the matrix.
       const merged = lowerObjectAssignIndexShape(L, call);
       if (merged) return merged;
-      // `Object.assign(target, source)` over signature-free RECORDS whose
-      // source fields all land on same-named, same-typed target fields
-      // (the mockable-clock restore: `Object.assign(mocked,
-      // implementations)` over one shape): the per-field copy helper,
-      // returning the TARGET — JS's aliasing, the target mutates in
-      // place. Undefined-armed source fields copy behind the
-      // not-undefined guard (an omitted optional field holds the
-      // undefined arm and must not erase the target's value — Node
-      // copies own keys only; an EXPLICIT `k: undefined` source diverges,
-      // the explicit-undefined-is-absent stance). Everything else keeps
-      // the spread hint.
-      if (call.arguments.length === 2 && !call.arguments.some((a) => ts.isSpreadElement(a))) {
+      // `Object.assign(target, ...sources)` over plain FIXED records: each
+      // source is planned before lowering, then arguments evaluate left to
+      // right into hidden locals BEFORE the first copy (ArgumentListEvaluation
+      // — a later source expression throwing leaves the target untouched).
+      // Copies run source-by-source, field-by-field in own-key order; later
+      // writes win; recordSet owns overwrite retain/release; the original
+      // target returns. Nullish sources evaluate and skip. Optional record
+      // fields preserve the existing absent-as-undefined stance; a SOURCE
+      // object literal whose `k: undefined` spelling is syntactically
+      // present gets its own exact copy path below.
+      if (call.arguments.length >= 1 && !call.arguments.some((a) => ts.isSpreadElement(a))) {
         const tProbe = probeLower(L, call.arguments[0]!);
-        const sProbe = probeLower(L, call.arguments[1]!);
         // CHECKED-DYNAMIC target and source (the JS file-scope
         // object-literal identity story): the runtime dyn copy — own
         // members of the source land on the target, which returns.
-        if (tProbe?.type.kind === "dyn") {
+        if (call.arguments.length === 2 && tProbe?.type.kind === "dyn") {
           const loc = locOf(call);
           const target = L.lowerExpr(call.arguments[0]!);
           const source = L.coerceToExpected(L.lowerExpr(call.arguments[1]!), DYN);
@@ -7493,25 +7608,105 @@ export function lowerPromiseMethodCall(L: Lowerer, call: ts.CallExpression,
             return { kind: "libCall", fn: "dyn.assign", args: [target, source], type: DYN, loc };
           }
         }
-        if (tProbe?.type.kind === "record" && sProbe?.type.kind === "record") {
-          const tShape = L.shapes.get(tProbe.type.shapeId);
-          const sShape = L.shapes.get(sProbe.type.shapeId);
-          const ok =
-            tShape && sShape &&
-            !tShape.tuple && !sShape.tuple &&
-            !tShape.indexValue && !sShape.indexValue &&
-            !shapeHasAccessorSlots(tShape) && !shapeHasAccessorSlots(sShape) &&
-            sShape.fields.every((sf) => {
-              const tf = tShape.fields.find((x) => x.name === sf.name);
-              return tf !== undefined && typeEquals(tf.type, sf.type);
-            });
-          if (ok) {
-            const loc = locOf(call);
-            const target = L.lowerExpr(call.arguments[0]!);
-            const source = L.lowerExpr(call.arguments[1]!);
-            if (target.type.kind === "record" && source.type.kind === "record") {
-              const helper = recordAssignHelper(L, target.type.shapeId, source.type.shapeId, loc);
-              return { kind: "call", callee: helper, args: [target, source], type: target.type, loc };
+        if (tProbe?.type.kind === "record") {
+          const targetShape = L.shapes.get(tProbe.type.shapeId);
+          // tsc returns an intersection that may refine a field narrower
+          // than the target. Re-typing the same pointer as a different
+          // record layout is not sound; coercing would allocate a copy and
+          // lose returned-target identity. Lower only when the result is
+          // discarded or maps back to the target's exact shape.
+          let parent: ts.Node = call.parent;
+          let assertedExact = false;
+          while (
+            ts.isParenthesizedExpression(parent) || ts.isVoidExpression(parent) ||
+            ts.isAsExpression(parent) || ts.isTypeAssertion(parent) || ts.isSatisfiesExpression(parent)
+          ) {
+            if (ts.isAsExpression(parent) || ts.isTypeAssertion(parent)) {
+              const asserted = L.mapTypeOf(L.typeOf(parent));
+              assertedExact ||= asserted !== null && typeEquals(asserted, tProbe.type);
+            }
+            parent = parent.parent;
+          }
+          const discarded = ts.isExpressionStatement(parent);
+          const resultIr = discarded ? tProbe.type : L.mapTypeOf(L.typeOf(call));
+          const resultHonest =
+            discarded || assertedExact || (resultIr !== null && typeEquals(resultIr, tProbe.type));
+          if (
+            resultHonest && targetShape && !targetShape.tuple && !targetShape.indexValue &&
+            !shapeHasAccessorSlots(targetShape)
+          ) {
+            type Source =
+              | { kind: "nullish"; node: ts.Expression }
+              | { kind: "record"; node: ts.Expression; type: IrType & { kind: "record" }; plan: RecordAssignPlan };
+            const sources: Source[] = [];
+            let ok = true;
+            for (const node of call.arguments.slice(1)) {
+              const probed = probeLower(L, node);
+              if (probed?.type.kind === "nullT" || probed?.type.kind === "undefinedT") {
+                sources.push({ kind: "nullish", node });
+                continue;
+              }
+              const mapped = L.mapTypeOf(L.typeOf(node));
+              if (mapped?.kind !== "record") {
+                ok = false;
+                break;
+              }
+              const plan = recordAssignPlan(
+                L,
+                tProbe.type.shapeId,
+                mapped.shapeId,
+                literalAssignOwnFields(node),
+              );
+              if (!plan) {
+                ok = false;
+                break;
+              }
+              sources.push({ kind: "record", node, type: mapped, plan });
+            }
+            if (ok) {
+              const loc = locOf(call);
+              const tLocal = L.declareHiddenLocal("%oat", tProbe.type);
+              const tRef = (): IrExpr => ({ kind: "varRef", localId: tLocal.id, type: tProbe.type, loc });
+              const stmts: IrStmt[] = [
+                { kind: "varDecl", localId: tLocal.id, init: L.lowerExprExpecting(call.arguments[0]!, tProbe.type), loc },
+              ];
+              const sourceRefs: { source: Extract<Source, { kind: "record" }>; ref: IrExpr }[] = [];
+              // Evaluate every source before mutating target. Nullish source
+              // expressions are retained as exprStmt when effectful.
+              for (const source of sources) {
+                if (source.kind === "nullish") {
+                  const value = nullishAssignSource(L, source.node);
+                  if (!value) {
+                    ok = false;
+                    break;
+                  }
+                  if (!droppableStatic(value)) stmts.push({ kind: "exprStmt", expr: value, loc: locOf(source.node) });
+                  continue;
+                }
+                const local = L.declareHiddenLocal("%oas", source.type);
+                const sourceLoc = locOf(source.node);
+                stmts.push({
+                  kind: "varDecl",
+                  localId: local.id,
+                  init: L.lowerExprExpecting(source.node, source.type),
+                  loc: sourceLoc,
+                });
+                sourceRefs.push({
+                  source,
+                  ref: { kind: "varRef", localId: local.id, type: source.type, loc: sourceLoc },
+                });
+              }
+              if (ok) {
+                for (const { source, ref } of sourceRefs) {
+                  const helper = recordAssignHelper(L, tProbe.type.shapeId, source.plan, locOf(source.node));
+                  stmts.push({
+                    kind: "exprStmt",
+                    expr: { kind: "call", callee: helper, args: [tRef(), ref], type: tProbe.type, loc: locOf(source.node) },
+                    loc: locOf(source.node),
+                  });
+                }
+                return { kind: "seqExpr", stmts, result: tRef(), type: tProbe.type, loc };
+              }
             }
           }
         }

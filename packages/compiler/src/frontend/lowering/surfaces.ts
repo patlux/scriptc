@@ -1448,11 +1448,11 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         "options; format with template literals, toFixed, and toString otherwise";
     } else if (container === "Object" && member === "assign") {
       hint =
-        "spread instead: { ...a, ...b } builds the merged record; what lowers: the empty-target " +
-        "literal-source shape (Object.assign({}, { ... }) IS the source literal) and merges INTO " +
-        "an index-signature record whose value slot every source value enters — " +
-        "other aliased targets are real mutation, and a function target (Object.assign(fn, { prop })) " +
-        "is a function-with-properties value the model cannot represent: bind the property separately";
+        "what lowers: aliased plain fixed-record targets when every source key already exists and its value " +
+        "lifts into the target slot (multiple sources, null/undefined skips, target identity, ordered overwrites), " +
+        "checked-dynamic plain objects, the empty-target literal shape, and index-signature target merges; " +
+        "arrays/classes/proxies/accessors/nonconfigurable properties and ambiguous aliased optional-source " +
+        "presence stay fenced — use explicit field assignments or a fresh spread object there";
     }
     L.noLowering(`${container}.${member}`, access, hint, sym);
   }

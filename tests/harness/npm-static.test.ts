@@ -133,6 +133,10 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     // schedule that imported definition exactly once instead of dead-
     // stripping it and leaving an undeclared IR call.
     ["definition-scheduling-consumer,definition-scheduling-provider", "definition-scheduling-cli.ts"],
+    // Request-options merge: Object.assign mutates an aliased typed target,
+    // skips nullish sources, applies multiple partial sources in order,
+    // returns target identity, and releases/replaces nested ref values.
+    ["object-assign-options-static", "object-assign-options-cli.ts"],
   ] as const)("%s compiles statically and byte-matches Node", async ([pkg, file]) => {
     const entry = join(pilotRoot, file);
     const binary = await buildStatic(entry, pkg.split(","));
