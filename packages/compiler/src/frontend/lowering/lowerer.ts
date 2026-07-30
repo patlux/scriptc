@@ -76,6 +76,7 @@ import {
   containsUnion,
   describeComponentBlocker,
   describeRecordMemberBlocker,
+  defaultEmptyObjectPatternParam,
   formatIrType,
   ISLAND_AMBIENT_TYPES,
   isUnitOnlyTsType,
@@ -670,7 +671,12 @@ export function dynFallbackType(L: Lowerer, node: ts.Node, t: ts.Type): IrType |
   // use meets its own fence or boxes as-is).
   const sig = pureSingleCallSignatureOf(L, t);
   if (sig) {
-    const params = sig.getParameters().map((p): IrType => {
+    const sigDecl = L.checker.signatureDeclaration(sig);
+    const declaredParams = sigDecl !== undefined && ts.isFunctionLike(sigDecl) ? sigDecl.parameters : undefined;
+    const params = sig.getParameters().map((p, i): IrType => {
+      const positional = declaredParams?.[i];
+      const decl = positional && ts.isParameter(positional) ? positional : L.checker.valueDeclarationOf(p);
+      if (decl && ts.isParameter(decl) && defaultEmptyObjectPatternParam(decl)) return DYN;
       const pt = L.checker.getTypeOfSymbolAtLocation(p, node);
       return L.mapTypeOf(pt) ?? DYN;
     });

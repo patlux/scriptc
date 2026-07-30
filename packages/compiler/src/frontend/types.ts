@@ -549,6 +549,15 @@ export interface TypeMapperCtx {
  * import from lowering/ — that edge is a module cycle): does the function's
  * OWN body read `arguments`? Nested plain functions/methods own theirs
  * (skipped); arrows see the enclosing one (descended). */
+export function defaultEmptyObjectPatternParam(param: ts.ParameterDeclaration): boolean {
+  if (!isJsSourceFile(param.getSourceFile()) || !ts.isObjectBindingPattern(param.name) || !param.initializer) {
+    return false;
+  }
+  let init: ts.Expression = param.initializer;
+  while (ts.isParenthesizedExpression(init)) init = init.expression;
+  return ts.isObjectLiteralExpression(init) && init.properties.length === 0;
+}
+
 function bodyReadsArgumentsLocal(fn: { body?: ts.Node | undefined }): boolean {
   let found = false;
   if (fn.body === undefined) return false;
@@ -2203,10 +2212,29 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       }
     }
     const params: IrType[] = [];
-    for (const p of sig.getParameters()) {
-      const decl = checker.valueDeclarationOf(p);
+    const signatureDecl = checker.signatureDeclaration(sig);
+    const declaredParams = signatureDecl !== undefined && ts.isFunctionLike(signatureDecl)
+      ? signatureDecl.parameters
+      : undefined;
+    for (const [i, p] of sig.getParameters().entries()) {
+      // Destructuring parameter symbols may point at a binding element
+      // rather than the enclosing ParameterDeclaration. The signature's
+      // positional declaration is authoritative for ABI syntax.
+      const positional = declaredParams?.[i];
+      const decl = positional && ts.isParameter(positional) ? positional : checker.valueDeclarationOf(p);
       if (decl && ts.isParameter(decl) && decl.dotDotDotToken) {
         return null;
+      }
+      // JavaScript's inferred function type for `({ keep } = {}) => ...`
+      // otherwise exposes an `{} | undefined` slot: the empty-record part
+      // is checker residue and rejects every real argument shape at an
+      // extracted callback call. Match the declaration lowering's ABI:
+      // one DYN slot, whose runtime object preserves keys, explicit
+      // undefined, callback identity and ownership. This remains a pure
+      // function type, so extracting `release` does not box or re-create it.
+      if (decl && ts.isParameter(decl) && defaultEmptyObjectPatternParam(decl)) {
+        params.push(DYN);
+        continue;
       }
       const optional =
         decl !== undefined &&

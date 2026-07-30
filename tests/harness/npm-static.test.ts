@@ -224,6 +224,22 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     }
   });
 
+  test("default-empty object patterns produce validator-clean dynamic callback ABIs", () => {
+    const entry = join(pilotRoot, "default-pattern-cli.ts");
+    const packages = ["default-pattern-static"];
+    const load = loadProgram(entry, { npmStatic: packages });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder);
+      expect(lowered.diagnostics).toEqual([]);
+      expect(lowered.module).not.toBeNull();
+      if (lowered.module === null) throw new Error("default-pattern fixture produced no IR module");
+      expect(validateModule(lowered.module)).toEqual([]);
+    } finally {
+      load.dispose();
+    }
+  });
+
   test("cross-package definition scheduling produces validator-clean exact-once IR", () => {
     const entry = join(pilotRoot, "definition-scheduling-cli.ts");
     const packages = ["definition-scheduling-consumer", "definition-scheduling-provider"];

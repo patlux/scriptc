@@ -8,7 +8,7 @@ import { lowerGenMethodCall } from "./lower-generators.js";
 import { BOOL, BYTES_U8, CAUGHT, DYN, F64, IrExpr, IrFunction, IrLocal, IrParam, IrStmt, IrType, JSVAL, NULL_T, STRING, SYMBOL_T, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, canDynCheckTo, canMarshalTypedFuncIntoIsland, funcOf, isUnitType, shapeHasAccessorSlots, typeEquals } from "../../ir/nodes.js";
 import type { IrFfiImport } from "../../ir/nodes.js";
 import { isJsSourceFile, locOf } from "../program.js";
-import { isGenericCallableMemberType, typeKey } from "../types.js";
+import { defaultEmptyObjectPatternParam, isGenericCallableMemberType, typeKey } from "../types.js";
 import { PoisonError, dynFallbackType, dynUndefinedExpr, importCallHandleType, jsFuncNameOf, newFnCtx, nodeThrowExpr, type WidthLift } from "./lowerer.js";
 import { enforceLibBoundary } from "./lib-boundary.js";
 import { NARROW_FIRST, builtinFenceHintOf, builtinModuleFnOf } from "./surfaces.js";
@@ -173,6 +173,16 @@ export interface GenericInstance {
    * - `...xs: T[]`: the ABI type is the array; call sites pack the surplus.
    */
   export function paramShape(L: Lowerer, param: ts.ParameterDeclaration): ParamShape {
+    // Emitted-JS options destructuring (`({ keep } = {}) => ...`) receives
+    // the same checked-dynamic source as the identifier spelling
+    // (`options = {}`). The checker otherwise reports the empty record for
+    // the whole pattern, losing every call-site key before the prologue can
+    // read it. DYN preserves omission/explicit-undefined, own-key presence,
+    // aliases and field defaults; lowerBindingPattern performs each keyed
+    // read once and keeps unsupported dynamic rest packing fenced.
+    if (defaultEmptyObjectPatternParam(param)) {
+      return { type: DYN, mode: "omittable", bodyType: DYN };
+    }
     // Island-handle params (a then-handler receiving a dynamic import's
     // namespace handle — markJsvalHandlerParams): jsval, whatever the
     // contextual type spelled.
@@ -2839,6 +2849,37 @@ export function lowerFfiCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null
 
 export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
     const loc = locOf(expr);
+
+    // A function value whose checker type is a UNION of arities (the pi-ai
+    // `release` extracted from records returned by different control-flow
+    // arms) may still have one resolved call signature at this site. When
+    // that selected declaration is the default-empty object-pattern form,
+    // its runtime ABI is the DYN slot paramShape assigns, not the checker's
+    // `{}` residue. Lower the callee once, preserve its closure identity,
+    // and complete omission/undefined exactly like every other func call.
+    // Other function unions keep their existing width/union fences.
+    if (ts.isIdentifier(expr.expression)) {
+      const calleeTs = L.typeOf(expr.expression);
+      if (calleeTs.isUnionType()) {
+        const rsig = L.checker.getResolvedSignature(expr);
+        const rdecl = rsig ? L.checker.signatureDeclaration(rsig) : undefined;
+        if (
+          rsig && rdecl && ts.isFunctionLike(rdecl) &&
+          rdecl.parameters.some(defaultEmptyObjectPatternParam)
+        ) {
+          const callee = L.lowerExpr(expr.expression);
+          if (callee.type.kind !== "func") L.badType(expr.expression, calleeTs);
+          const params = callee.type.params;
+          const args = expr.arguments.map((arg, i) => L.lowerExprExpecting(arg, params[i]));
+          for (let i = args.length; i < params.length; i++) {
+            const absent = omittedArgFor(L, params[i]!, loc);
+            if (!absent) L.unsupported("SC1090", expr, "calls omitting a non-optional parameter of the callee's type");
+            args.push(absent);
+          }
+          return { kind: "callValue", callee, args, type: callee.type.ret, loc };
+        }
+      }
+    }
 
     // No-ICU host capability resolution: calls of the exact pi-tui
     // Segmenter factory with an omitted/null constructor instantiate the
