@@ -3355,20 +3355,21 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       return { kind: "libCall", fn: "island.eval", args: [code], type: STRING, loc };
     }
 
-    // A direct primitive method call can be checker-typed `any` at the
-    // WHOLE property callee under --dynamic — notably inside an npm-static
-    // implicit-any instance — even though typeOf has rebound its root and
-    // the receiver lowers to a concrete string/array. Give the ordinary
-    // direct-call recognizers first refusal before the island's
-    // callee-as-value path reads `.includes`/`.map` as a function value.
-    // This preserves JS method binding and extraction semantics: only the
-    // syntactic `recv.method(...)` call is served; `const f = recv.method`
-    // still reaches the existing unbound-method fence. Each recognizer
-    // emits the receiver exactly once in the returned IR.
+    // An npm-static implicit-any instance can leave the WHOLE property
+    // callee checker-typed `any` under --dynamic even though the rebound
+    // receiver lowers to a concrete primitive (`entrypoint.includes(...)`,
+    // `entrypoint.split(...).map(...)`). Give direct primitive method
+    // recognizers first refusal only for that stale island-callee spelling.
+    // Ordinary typed calls must continue through the complete dispatcher
+    // below: it gives specialized forms such as filter(Boolean) precedence
+    // over generic array HOF lowering. The syntax gate preserves binding and
+    // extraction semantics: only `recv.method(...)` is served here.
     if (
+      L.implicitParamTypes !== null &&
       ts.isPropertyAccessExpression(expr.expression) &&
       !expr.expression.questionDotToken &&
-      !expr.questionDotToken
+      !expr.questionDotToken &&
+      L.isIslandExpr(expr.expression)
     ) {
       const rebound =
         L.lowerRegexMethodCall(expr, expr.expression) ??
