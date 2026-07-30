@@ -4207,9 +4207,11 @@ export type IrExpr =
   | { kind: "mapNew"; seed?: { key: IrExpr; value: IrExpr }[]; type: IrType; loc: SrcLoc }
   /** Map method/property on a map receiver (`type` of the receiver is the
    * map; K/V below are its key/value types): `get` (one K arg, borrowed →
-   * the interned `V | undefined` union, owned +1 — the undefined arm is the
-   * miss; because `undefined` sorts LAST in canonical arm order, a union V
-   * keeps its tags and the stored box IS the result), `set` (K borrowed,
+   * normally the interned `V | undefined` union, owned +1 — the undefined
+   * arm is the miss; because `undefined` sorts LAST in canonical arm order,
+   * a union V keeps its tags and the stored box IS the result; when V is
+   * dyn, the result is dyn directly and a miss is its undefined kind),
+   * `set` (K borrowed,
    * V moves in; replacing releases the old value; → void — the ambient
    * declares void, not the JS `this`, so chaining is a type error), `has`
    * (K borrowed → bool, SameValueZero), `delete` (K borrowed → bool;

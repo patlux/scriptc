@@ -1254,15 +1254,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const method = e.method;
         switch (method) {
           case "get": {
-            // The union construction is type-directed HERE, like
-            // process.envGet — the runtime knows no tags. Ref values come
-            // back +1 (ownership MOVES into the fresh union box on a hit);
-            // scalars ride an out-param behind a found flag; a miss is the
-            // interned immortal undefined-arm instance. When V is itself a
-            // union, the stored box IS the result: `undefined` sorts last
-            // in canonical arm order, so V's tags coincide with the result
-            // union's and no re-tag exists (validated).
+            // The result is type-directed HERE, like process.envGet. A dyn
+            // value slot returns the stored checked-dynamic value (+1), or
+            // the dyn undefined singleton on a miss. Other values build the
+            // tagged `V | undefined` union: refs come back +1, scalars use
+            // an out-param, and union values reuse their stored box.
             const k = E.emitExpr(e.args[0]!);
+            if (value.kind === "dyn") {
+              if (e.type.kind !== "dyn") throw new Error("emitter bug: dyn map get result is not dyn");
+              const v = E.newTemp(e.type, `(ScrDyn *)scr_map_get_${kAcc}_ref(${r.name}, ${k.name})`);
+              E.line(`if (!${v.name}) ${v.name} = scr_dyn_retain(scr_dyn_undefined());`);
+              return v;
+            }
             if (e.type.kind !== "union") throw new Error("emitter bug: map get result is not a union");
             const def = E.unionsById.get(e.type.unionId);
             const undefTag = E.undefinedArmTag(e.type);

@@ -2445,17 +2445,20 @@ function validateFunction(
         }
         const { key, value } = e.receiver.type;
         if (e.method === "get") {
-          // Result is the interned `V | undefined` union: an undefined arm
-          // must exist, and every OTHER arm must be V (V non-union) or one
-          // of V's arms IN ORDER (V union — `undefined` sorts last in
-          // canonical arm order, so tags coincide and the backend can hand
-          // the stored box straight through).
+          // A dyn value slot absorbs the missing-key undefined in its own
+          // representation. Every other V returns the interned `V |
+          // undefined` union: an undefined arm must exist, and every OTHER
+          // arm must be V (V non-union) or one of V's arms IN ORDER.
           if (e.args.length !== 1) {
             err(`mapIntrinsic get: ${e.args.length} args, expected 1`, e.loc);
             break;
           }
           checkExpr(e.args[0]!);
           expectType(e.args[0]!, key, "mapIntrinsic get key");
+          if (value.kind === "dyn") {
+            if (e.type.kind !== "dyn") err("mapIntrinsic get of dyn values must return dyn", e.loc);
+            break;
+          }
           const def = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
           const rest = def ? def.arms.filter((a) => a.kind !== "undefinedT") : [];
           // When V is itself a union its own undefined arm (if any) folds

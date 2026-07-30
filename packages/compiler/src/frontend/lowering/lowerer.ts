@@ -5806,6 +5806,33 @@ export class Lowerer {
    * lowering goes through here (via lowerExprExpecting) or calls this
    * directly when the expression was already lowered. */
   coerceInto(node: ts.Node, expr: IrExpr, expected: IrType): IrExpr {
+    // `never` is control-flow bottom, not a value representation. A
+    // never-typed expression (normally a call to a throw-only function)
+    // lowers as void because it cannot return; when it occupies a value
+    // arm, sequence that call for its effects and put an always-throwing
+    // typed backstop after it. The backstop is unreachable for a sound
+    // never declaration, but gives the IR a result type without pretending
+    // the never expression produced one.
+    if (
+      expr.type.kind === "void" &&
+      expected.kind !== "void" &&
+      (this.typeOf(node).flags & ts.TypeFlags.Never) !== 0
+    ) {
+      const loc = expr.loc;
+      return {
+        kind: "seqExpr",
+        stmts: [{ kind: "exprStmt", expr, loc }],
+        result: nodeThrowExpr(
+          0,
+          "",
+          "scriptc: unreachable: a never-returning expression completed",
+          expected,
+          loc,
+        ),
+        type: expected,
+        loc,
+      };
+    }
     let e = this.coerceToExpected(expr, expected);
     // An 'any' value PROVABLY null/undefined (the unit literal itself, or
     // a read of a binding nothing ever assigns a non-unit value) flowing

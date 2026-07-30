@@ -164,6 +164,29 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   }, 120_000);
 
   test.for([undefined, "c"] as const)(
+    "an unknown-valued provider registry stays static (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "unknown-registry-cli.ts");
+      const packages = ["unknown-registry-static"];
+      const { coverage } = analyze(entry, { npmStatic: packages });
+      expect(coverage.npmStatic).toEqual([{ package: "unknown-registry-static", status: "static" }]);
+      expect(coverage.preflightFailed).toBe(false);
+      expect(coverage.diagnostics).toHaveLength(0);
+      expect(coverage.runtimeFences ?? []).toHaveLength(0);
+      expect(coverage.stats.statementsFailed).toBe(0);
+      expect(coverage.stats.statementsIsland).toBe(0);
+      const binary = await buildStatic(entry, packages, backend);
+      const [nodeRes, nativeRes] = await Promise.all([
+        runBinary("node", [entry]),
+        runBinary(binary, []),
+      ]);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    },
+    120_000,
+  );
+
+  test.for([undefined, "c"] as const)(
     "an imported compact class base preserves inheritance (%s backend)",
     async (backend) => {
       const entry = join(pilotRoot, "imported-base-class-cli.ts");
@@ -257,6 +280,27 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         key: { kind: "string" },
         value: { kind: "f64" },
       });
+    } finally {
+      load.dispose();
+    }
+  });
+
+  test("unknown provider registry produces validator-clean static IR", () => {
+    const entry = join(pilotRoot, "unknown-registry-cli.ts");
+    const packages = ["unknown-registry-static"];
+    const load = loadProgram(entry, { npmStatic: packages });
+    try {
+      expect(checkPreflight(load)).toEqual([]);
+      const lowered = lowerToIr(load.program, load.entry, load.moduleOrder);
+      expect(lowered.diagnostics).toEqual([]);
+      const module = lowered.module;
+      expect(module).not.toBeNull();
+      if (module === null) throw new Error("unknown provider registry produced no IR module");
+      expect(validateModule(module)).toEqual([]);
+      const valueMaps = module.globals?.filter(
+        (global) => global.type.kind === "map" && global.type.value.kind === "dyn",
+      ) ?? [];
+      expect(valueMaps).toHaveLength(1);
     } finally {
       load.dispose();
     }

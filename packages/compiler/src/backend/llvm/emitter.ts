@@ -9069,13 +9069,27 @@ class LlEmitter {
     const method = e.method;
     switch (method) {
       case "get": {
-        // The union construction is type-directed HERE, like envGet — the
-        // runtime knows no tags. Ref values come back +1 (ownership MOVES
-        // into the fresh union box on a hit); scalars ride an out-param
-        // behind a found flag; a miss is the interned undefined-arm
-        // instance. When V is itself a union, the stored box IS the
-        // result (`undefined` sorts last in canonical arm order).
+        // Type-directed like envGet. A dyn value slot returns the stored
+        // checked-dynamic value (+1), or dyn undefined on a miss. Other
+        // values build the tagged `V | undefined` result.
         const k = this.emitExpr(e.args[0]!);
+        if (value.kind === "dyn") {
+          if (e.type.kind !== "dyn") throw new Error("llvm emitter bug: dyn map get result is not dyn");
+          this.declare(`declare ptr @scr_map_get_${kAcc}_ref(ptr, ${kTy})`);
+          this.declare(`declare ptr @scr_dyn_undefined()`);
+          this.declare(`declare ptr @scr_dyn_retain_v(ptr)`);
+          const raw = B.tmp();
+          const miss = B.tmp();
+          const undef = B.tmp();
+          const retainedUndef = B.tmp();
+          const out = B.tmp();
+          B.line(`${raw} = call ptr @scr_map_get_${kAcc}_ref(ptr ${r.name}, ${kTy} ${k.name})`);
+          B.line(`${miss} = icmp eq ptr ${raw}, null`);
+          B.line(`${undef} = call ptr @scr_dyn_undefined()`);
+          B.line(`${retainedUndef} = call ptr @scr_dyn_retain_v(ptr ${undef})`);
+          B.line(`${out} = select i1 ${miss}, ptr ${retainedUndef}, ptr ${raw}`);
+          return this.own({ name: out, type: e.type });
+        }
         if (e.type.kind !== "union") throw new Error("llvm emitter bug: map get result is not a union");
         const def = this.unionsById.get(e.type.unionId);
         const undefTag = this.undefinedArmTag(e.type);

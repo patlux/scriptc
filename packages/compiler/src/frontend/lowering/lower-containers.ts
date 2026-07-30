@@ -2115,13 +2115,17 @@ import { dynUndefinedExpr, own, WidthLift } from "./lowerer.js";
 
     if (name === "get") {
       const k = L.lowerExprExpecting(call.arguments[0]!, receiverIr.key);
-      // The checker types ordinary Maps as `V | undefined`. Erased
-      // npm-static JS Maps still say `any`, so build the same canonical
-      // result from the specialized value type.
-      const type = (L.typeOf(call).flags & ts.TypeFlags.Any) !== 0
-        ? L.withUndefinedArm(receiverIr.value)
-        : L.irTypeOf(call);
-      if (type.kind !== "union") L.badType(call, L.typeOf(call));
+      // `Map<K, unknown>.get()` is checker-`unknown`: `unknown |
+      // undefined` collapses to unknown, and dyn already represents the
+      // missing-key undefined value. Every other V uses the canonical
+      // tagged `V | undefined` result. Erased npm-static JS Maps still say
+      // `any`, so derive their result from the specialized value slot too.
+      const type = receiverIr.value.kind === "dyn"
+        ? DYN
+        : (L.typeOf(call).flags & ts.TypeFlags.Any) !== 0
+          ? L.withUndefinedArm(receiverIr.value)
+          : L.irTypeOf(call);
+      if (type.kind !== "dyn" && type.kind !== "union") L.badType(call, L.typeOf(call));
       return { kind: "mapIntrinsic", method: "get", receiver, args: [k], type, loc };
     }
     if (name === "set") {
@@ -2176,6 +2180,13 @@ const MAP_ITER_METHODS = new Set(["keys", "values", "entries"]);
     // tuple shape the surrounding literal will intern too.
     let elemT: IrType;
     let tupleT: (IrType & { kind: "record" }) | null = null;
+    if (method !== "keys" && mapT.value.kind === "dyn") {
+      L.noLowering(
+        `.${method}() on an unknown-valued Map`,
+        call,
+        "checked-dynamic values have no static array element representation — read known keys individually and narrow each result",
+      );
+    }
     if (method === "keys") elemT = mapT.key;
     else if (method === "values") elemT = mapT.value;
     else {
