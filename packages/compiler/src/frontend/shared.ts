@@ -203,6 +203,36 @@ export function isRelativeSpecifier(spec: string): boolean {
   return spec === "." || spec === ".." || spec.startsWith("./") || spec.startsWith("../");
 }
 
+/** Package-relative path for `file` inside `pkg`, or null when the path
+ * cannot be proven to stay inside that package. node_modules installs use
+ * the innermost package segment (scoped names consume two components);
+ * registered workspace packages use their realpath root. The result always
+ * uses `/`, never begins with `/`, and contains no `..` component. */
+export function npmPackageRelativePathOf(file: string, pkg: string): string | null {
+  const norm = file.split("\\").join("/");
+  const marker = `/node_modules/${pkg}/`;
+  const i = norm.lastIndexOf(marker);
+  let relative: string | null = i === -1 ? null : norm.slice(i + marker.length);
+  if (relative === null) {
+    for (const [dir, name] of workspacePackageDirs) {
+      if (name !== pkg) continue;
+      if (norm.startsWith(dir) && norm[dir.length] === "/") {
+        relative = norm.slice(dir.length + 1);
+        break;
+      }
+    }
+  }
+  if (
+    relative === null ||
+    relative === "" ||
+    relative.startsWith("/") ||
+    relative.split("/").includes("..")
+  ) {
+    return null;
+  }
+  return relative;
+}
+
 /** Package name from a path under node_modules — the LAST node_modules
  * segment (nested installs blame the innermost package), scoped-aware:
  * ".../node_modules/@scope/pkg/dist/x.d.ts" → "@scope/pkg". Paths with no

@@ -1897,6 +1897,10 @@ double scr_process_getgid(void);
  * first read; +1 per read. Node's value is the node executable's path —
  * SEMANTICS.md divergence 12 documents the difference. */
 ScrStr *scr_process_exec_path(void);
+/* Resolve one package-qualified embedded-module identity below the running
+ * artifact's sibling `.scriptc-modules` tree and return its canonical
+ * file:// URL. `identity` is borrowed; result +1. Executable lane only. */
+ScrStr *scr_module_url(ScrStr *identity);
 /* process.arch: the binary's OWN architecture ("arm64", "x64") — Node's
  * answer for its own build on the same machine. +1 interned. */
 ScrStr *scr_process_arch(void);

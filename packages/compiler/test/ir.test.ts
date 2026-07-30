@@ -61,7 +61,7 @@ test("validator rejects invalid union arms and bare unit returns fail-closed", (
 test("validator accepts shift results only in canonical top or tagged representations", () => {
   const loc = { file: "t.ts", start: 0, end: 0 };
   const make = (elem: IrType, result: IrType): IrModule => ({
-    irVersion: 3,
+    irVersion: 4,
     sourceFile: "t.ts",
     entry: "__main",
     unions: result.kind === "union"
@@ -109,7 +109,7 @@ test("validator accepts shift results only in canonical top or tagged representa
 test("validator rejects type mismatches and bad references", () => {
   const loc = { file: "t.ts", start: 0, end: 0 };
   const bad: IrModule = {
-    irVersion: 3,
+    irVersion: 4,
     sourceFile: "t.ts",
     entry: "__main",
     functions: [
@@ -191,7 +191,7 @@ test("typed-promise dynFrom pulls the checked-dynamic async runtime", () => {
 test("validator keeps direct-call return types fail-closed", () => {
   const loc = { file: "recursive.js", start: 0, end: 0 };
   const mod: IrModule = {
-    irVersion: 3,
+    irVersion: 4,
     sourceFile: "recursive.js",
     entry: "%main",
     functions: [
@@ -221,7 +221,7 @@ test("validator keeps direct-call return types fail-closed", () => {
 test("validator keeps island method arguments fail-closed", () => {
   const loc = { file: "method.js", start: 0, end: 0 };
   const mod: IrModule = {
-    irVersion: 3,
+    irVersion: 4,
     sourceFile: "method.js",
     entry: "%main",
     functions: [
@@ -282,6 +282,6 @@ test("serializer round-trips ±Infinity and refuses NaN", () => {
 });
 
 test("deserializer enforces IR version", () => {
-  const json = serializeModule(fibModule).replace('"irVersion": 3', '"irVersion": 99');
+  const json = serializeModule(fibModule).replace('"irVersion": 4', '"irVersion": 99');
   expect(() => deserializeModule(json)).toThrow(/version mismatch/);
 });

@@ -19,7 +19,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import { analyze, compile, validateModule } from "@scriptc/compiler";
@@ -55,7 +55,7 @@ async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
 async function buildStatic(
   entry: string,
   npmStatic: string[] | "auto",
-  backend: "c" | undefined = "c",
+  backend: "c" | "llvm" | undefined = "c",
   dynamic = false,
 ): Promise<string> {
   const hash = createHash("sha256");
@@ -370,23 +370,66 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     120_000,
   );
 
-  test("statically embedded npm metadata survives binary relocation", async () => {
-    const entry = join(pilotRoot, "import-meta-static-cli.ts");
-    const binary = await buildStatic(entry, ["import-meta-static"], "c");
-    const relocatedRoot = mkdtempSync(join(cacheDir, "import-meta-relocated-"));
-    try {
-      const relocatedBinary = join(relocatedRoot, "program");
-      copyFileSync(binary, relocatedBinary);
-      cpSync(join(pilotRoot, "node_modules/import-meta-static/nested space"), join(relocatedRoot, "nested space"), {
-        recursive: true,
-      });
-      const result = await runBinary(relocatedBinary, []);
-      expect(result.stdout.toString("utf8")).toBe("true|true|true|true|true\n");
-      expect(result.exitCode).toBe(0);
-    } finally {
-      rmSync(relocatedRoot, { recursive: true, force: true });
-    }
-  }, 120_000);
+  test.for(["llvm", "c"] as const)(
+    "package-qualified import.meta URLs track the artifact root before and after relocation (%s backend)",
+    async (backend) => {
+      const entry = join(pilotRoot, "import-meta-relocation-cli.ts");
+      const packages = ["import-meta-static", "@scope/import-meta-static"];
+      const binary = await buildStatic(entry, packages, backend);
+      const originalRoot = dirname(binary);
+      const stagingRoot = dirname(entry);
+      const compileEntryRoot = dirname(stagingRoot);
+      const copySidecars = (artifactRoot: string): void => {
+        for (const pkg of packages) {
+          cpSync(
+            join(pilotRoot, "node_modules", pkg, "nested space"),
+            join(artifactRoot, ".scriptc-modules", pkg, "nested space"),
+            { recursive: true },
+          );
+        }
+      };
+      const assertRun = async (artifactRoot: string, program: string): Promise<void> => {
+        const result = await runBinary(program, []);
+        expect(result.exitCode).toBe(0);
+        const lines = result.stdout.toString("utf8").trimEnd().split("\n");
+        const rows = {
+          plain: lines[0]!.slice(2).split("\t"),
+          scoped: lines[1]!.slice(2).split("\t"),
+        };
+        for (const [pkg, row] of [[packages[0]!, rows.plain], [packages[1]!, rows.scoped]] as const) {
+          const expectedFile = join(artifactRoot, ".scriptc-modules", pkg, "nested space", "shared [x].js");
+          const expectedDir = dirname(expectedFile);
+          expect(row[1]).toBe(expectedFile);
+          expect(row[2]).toBe(expectedDir);
+          expect(row[3]).toBe("true");
+          expect(row[4]).toBe(pkg.startsWith("@") ? "scoped-package" : "plain-package");
+          expect(row[5]).toBe(join(pilotRoot, "node_modules", pkg, "nested space", "data.json"));
+          expect(row[0]).toContain("nested%20space/shared%20%5Bx%5D.js");
+          expect(row[0]).not.toContain(stagingRoot);
+          expect(isAbsolute(row[1])).toBe(true);
+        }
+        expect(rows.plain[1]).not.toBe(rows.scoped[1]);
+      };
+
+      copySidecars(originalRoot);
+      await assertRun(originalRoot, binary);
+      const binaryBytes = readFileSync(binary);
+      expect(binaryBytes.includes(Buffer.from(join(stagingRoot, ".scriptc-modules")))).toBe(false);
+      expect(binaryBytes.includes(Buffer.from(join(compileEntryRoot, ".scriptc-modules")))).toBe(false);
+      expect(binaryBytes.includes(Buffer.from("file:///" + join(stagingRoot, ".scriptc-modules")))).toBe(false);
+
+      const relocatedRoot = mkdtempSync(join(cacheDir, "import-meta-relocated-"));
+      try {
+        const relocatedBinary = join(relocatedRoot, "program");
+        copyFileSync(binary, relocatedBinary);
+        copySidecars(relocatedRoot);
+        await assertRun(relocatedRoot, relocatedBinary);
+      } finally {
+        rmSync(relocatedRoot, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
 
   test.for([undefined, "c"] as const)(
     "node:module with literal createRequire edges stays statically admitted (%s backend)",

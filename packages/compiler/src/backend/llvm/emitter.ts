@@ -1316,6 +1316,7 @@ class LlEmitter {
       `@scr_error_vts = external global [5 x %ScrVt]`,
       `declare void @scr_init()`,
       `declare void @scr_lib_init(i32, ptr)`,
+      ...(this.mod.lib === undefined ? [`declare ptr @scr_module_url(ptr)`] : []),
     );
     for (const d of this.decls) out.push(d);
     out.push(``);
@@ -3875,6 +3876,12 @@ class LlEmitter {
       case "strLit": {
         const sym = this.internLiteral(e.value);
         return this.own({ name: this.retainValue(sym, e.type), type: e.type });
+      }
+      case "moduleUrl": {
+        const identity = this.internLiteral(e.identity);
+        const out = B.tmp();
+        B.line(`${out} = call ptr @scr_module_url(ptr ${identity})`);
+        return this.own({ name: out, type: e.type });
       }
       case "unitLit":
         // unitLits are consumed inline by the unionWrap case (a unit arm is

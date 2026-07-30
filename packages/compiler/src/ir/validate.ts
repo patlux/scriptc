@@ -1664,6 +1664,17 @@ function validateFunction(
       case "strLit":
         if (e.type.kind !== "string") err("strLit must be string", e.loc);
         break;
+      case "moduleUrl":
+        if (e.type.kind !== "string") err("moduleUrl must be string", e.loc);
+        if (
+          e.identity === "" ||
+          e.identity.startsWith("/") ||
+          e.identity.endsWith("/") ||
+          e.identity.split("/").some((part) => part === "" || part === "." || part === "..")
+        ) {
+          err("moduleUrl identity must be a safe package-qualified relative path", e.loc);
+        }
+        break;
       case "boolLit":
         if (e.type.kind !== "bool") err("boolLit must be bool", e.loc);
         break;

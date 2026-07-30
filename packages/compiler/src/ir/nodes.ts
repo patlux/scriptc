@@ -679,7 +679,7 @@ export function isRefCounted(t: IrType): boolean {
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
-  irVersion: 3;
+  irVersion: 4;
   sourceFile: string;
   functions: IrFunction[];
   /** Class shapes. Constructors and methods are ordinary module functions
@@ -3937,6 +3937,13 @@ export type IrExpr =
    * for every program that held its numbers. */
   | { kind: "numLit"; value: number; spelling?: string; type: IrType; loc: SrcLoc }
   | { kind: "strLit"; value: string; type: IrType; loc: SrcLoc }
+  /** Relocation-safe `import.meta.url` for a statically embedded package
+   * module. `identity` is the slash-separated
+   * `<package-name>/<package-relative-path>` below the artifact's sibling
+   * `.scriptc-modules` root. Backends resolve it at runtime and convert
+   * the absolute path through the URL bridge, so percent escaping follows
+   * the target runtime rather than leaking the compiler's staging root. */
+  | { kind: "moduleUrl"; identity: string; type: IrType; loc: SrcLoc }
   | { kind: "boolLit"; value: boolean; type: IrType; loc: SrcLoc }
   /** An `undefined` or `null` literal; `type` is the matching unit kind.
    * Valid ONLY as the immediate value of a `unionWrap` (the frontend's slot

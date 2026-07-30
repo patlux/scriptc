@@ -1150,6 +1150,7 @@ class FnAnalyzer {
         return e.fn.startsWith("math.") && e.args.every((a) => this.isPure(a));
       case "numLit":
       case "strLit":
+      case "moduleUrl":
       case "boolLit":
       case "varRef":
       case "unitLit":
@@ -1221,6 +1222,7 @@ class FnAnalyzer {
       case "numLit":
         return constVal(e.value, e.spelling);
       case "strLit":
+      case "moduleUrl":
       case "boolLit":
       case "unitLit":
       case "regexLit":

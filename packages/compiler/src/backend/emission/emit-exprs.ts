@@ -24,6 +24,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const sym = E.internLiteral(e.value);
         return E.newTemp(e.type, retainCallC(e.type, `(ScrStr *)&${sym}`));
       }
+      case "moduleUrl": {
+        const identity = E.internLiteral(e.identity);
+        return E.newTemp(e.type, `scr_module_url((ScrStr *)&${identity})`);
+      }
       case "unitLit":
         // unitLits are consumed inline by the unionWrap case (a unit arm is
         // tag-only); one reaching the generic dispatch escaped its wrap.

@@ -5,11 +5,12 @@
  * ToBoolean/ToString coercion helpers, and field/element reads and writes
  * (FieldTarget). */
 import * as ts from "../ts7/adapter.js";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Lowerer } from "./lowerer.js";
 import { BOOL, CAUGHT, DYN, DYN_HANDLE_KINDS, F64, IrExpr, IrFunction, IrJsOp, IrLocal, IrRecordShape, IrStmt, IrType, JSVAL, NULL_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_ERROR_CLASSES, SEARCH_PARAMS_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canAdaptDynFuncTo, canBoxFuncIntoDyn, canDynCheckTo, funcOf, isJsonSafeType, isUnitType, jsOpResultKind, shapeHasAccessorSlots, typeEquals, typeKey, unionFuncSetArmsOk } from "../../ir/nodes.js";
 import { cjsClassExprWholeExportOf, cjsExportAssignmentOf, cjsExportDiscardReason, isCjsExportTableLiteral, isCjsJsFile, isJsSourceFile, isModuleExportsAccess, isNodeEsmFile, locOf, npmPackageNameOf } from "../program.js";
+import { npmPackageRelativePathOf } from "../shared.js";
 import { ARRAY_METHODS, builtinConstLit, builtinFenceHintOf, builtinModuleConstOf, builtinModulesArrayLit, builtinModuleFnOf, CompoundOp, ISLAND_SURFACE, isChildSurfaceMember, MAP_METHODS, NARROW_FIRST, SET_METHODS, STR_METHODS, UNSUPPORTED_EXPR, sideEffectFreeOptionValue, stdlibGlobalNameOf } from "./surfaces.js";
 import { UNSUPPORTED, blockedBindingUseDiag, recordShapeMismatchDiag, requiresDynamicPackageDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import { PoisonError, dynUndefinedExpr, jsFuncNameOf, neverTaintedJsType, nodeThrowExpr, own } from "./lowerer.js";
@@ -30,44 +31,18 @@ import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./
 /** An assignable `obj.field` target — a class field, a record field, or a
  * class ACCESSOR property (reads become getter calls, writes setter calls;
  * fieldType is the property's one type). */
-/** Stable ESM identity for one statically embedded source file. Program
- * modules preserve their exact source path (the same stance as
- * __filename). Installed npm modules additionally carry a relocation
- * anchor below `<entry-root>/.scriptc-modules/<package>/`, retaining both
- * package name and package-relative suffix. That keeps module identities
- * distinct and useful to fileURLToPath, dirname, and string predicates
- * without baking a transient staging root into the native product.
- * If no safe package-relative suffix can be derived, fail closed rather
- * than manufacturing an identity. */
-function staticImportMetaPath(L: Lowerer, sf: ts.SourceFile): string | null {
+/** Runtime-relative ESM identity for one statically embedded source file.
+ * Program modules preserve their source URL as before. Installed npm
+ * modules carry only `<package-name>/<package-relative-path>` in IR; both
+ * backends resolve that identity below the running artifact's sibling
+ * `.scriptc-modules` root. No compile/staging root reaches the binary.
+ * The package prefix separates same-named files across packages, including
+ * scoped names; the runtime URL bridge supplies canonical percent escaping. */
+function staticImportMetaIdentity(sf: ts.SourceFile): string | null {
   const pkg = npmPackageNameOf(sf.fileName);
-  if (pkg === null) return sf.fileName;
-  const norm = sf.fileName.split("\\").join("/");
-  const marker = `/node_modules/${pkg}/`;
-  const index = norm.lastIndexOf(marker);
-  if (index === -1) return null;
-  const packageRelative = norm.slice(index + marker.length);
-  if (
-    packageRelative === "" ||
-    packageRelative.startsWith("../") ||
-    packageRelative.split("/").includes("..") ||
-    isAbsolute(packageRelative)
-  ) {
-    return null;
-  }
-  const entryDir = dirname(L.entry.fileName);
-  // A virtual identity tree beside the executable: no loader reads it,
-  // but its package-qualified shape survives relocation and cannot collide
-  // when two embedded packages ship the same relative file name.
-  const anchored = resolve(
-    entryDir,
-    ".scriptc-modules",
-    pkg.split("/").join(sep),
-    packageRelative.split("/").join(sep),
-  );
-  const rel = relative(entryDir, anchored);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
-  return anchored;
+  if (pkg === null) return null;
+  const packageRelative = npmPackageRelativePathOf(sf.fileName, pkg);
+  return packageRelative === null ? null : `${pkg}/${packageRelative}`;
 }
 
 export type FieldTarget =
@@ -210,11 +185,16 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       expr.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
       isNodeEsmFile(expr.getSourceFile())
     ) {
-      const file = staticImportMetaPath(L, expr.getSourceFile());
-      if (file === null) {
+      const sf = expr.getSourceFile();
+      const pkg = npmPackageNameOf(sf.fileName);
+      if (pkg === null) {
+        return { kind: "strLit", value: pathToFileURL(sf.fileName).href, type: STRING, loc };
+      }
+      const identity = staticImportMetaIdentity(sf);
+      if (identity === null) {
         L.unsupported("SC1090", expr, "'import.meta.url' for a statically embedded module with no stable package-relative identity");
       }
-      return { kind: "strLit", value: pathToFileURL(file).href, type: STRING, loc };
+      return { kind: "moduleUrl", identity, type: STRING, loc };
     }
     if (ts.isRegularExpressionLiteral(expr)) return L.lowerRegexLiteral(expr);
     if (ts.isTemplateExpression(expr)) return L.lowerTemplate(expr);
@@ -2507,6 +2487,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
     switch (e.kind) {
       case "numLit":
       case "strLit":
+      case "moduleUrl":
       case "boolLit":
       case "unitLit":
         return true;
