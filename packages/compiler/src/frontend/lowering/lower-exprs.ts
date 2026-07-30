@@ -10679,9 +10679,13 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
       if (fieldType) {
         const obj = L.lowerExpr(access.expression);
         // A checker-record receiver whose VALUE stayed dyn (the erased
-        // all-unknown-fields cast — `(err as { code?: unknown }).code`):
-        // decline, and the dyn keyed-read fallback answers.
-        if (obj.type.kind !== "record") return null;
+        // all-unknown-fields cast — `(err as { code?: unknown }).code`),
+        // or retained a different concrete record shape through an erasing
+        // assertion (`({} as { color?: string }).color`): decline. The
+        // lowered-value fallback reads the real shape — dyn keyed access,
+        // an actual field, or the empty-record undefined miss — instead of
+        // emitting recordGet with the checker's unrelated shapeId.
+        if (obj.type.kind !== "record" || obj.type.shapeId !== receiverIr.shapeId) return null;
         return { container: "record", obj, shapeId: receiverIr.shapeId, field: access.name.text, fieldType };
       }
       // A RECORD accessor property: either slot present makes the name an

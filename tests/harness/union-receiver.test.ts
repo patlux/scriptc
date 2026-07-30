@@ -34,10 +34,15 @@ async function run(cmd: string, args: string[]): Promise<RunResult> {
   }
 }
 
-async function compileAndCompare(name: string, source: string): Promise<void> {
+async function compileAndCompare(
+  name: string,
+  source: string,
+  backend: "c" | "llvm",
+  dynamic: boolean,
+): Promise<void> {
   const key = createHash("sha256")
     .update(source)
-    .update(sanitize ? "san" : "plain")
+    .update(`${backend}-${sanitize ? "san" : "plain"}`)
     .digest("hex")
     .slice(0, 16);
   const outDir = join(cacheDir, `union-receiver-${key}`);
@@ -48,8 +53,8 @@ async function compileAndCompare(name: string, source: string): Promise<void> {
     outPath: join(outDir, "program"),
     outDir,
     sanitize,
-    dynamic: true,
-    backend: "c",
+    dynamic,
+    backend,
   });
   if (!result.ok) {
     throw new Error(
@@ -73,22 +78,38 @@ class B { value = "B"; }
 const concrete = new A();
 `;
 
-describe(`union receivers through dynamic calls${sanitize ? " (sanitized)" : ""}`, () => {
-  test("preserves a concrete class receiver in a dyn object-literal argument", async () => {
-    await compileAndCompare(
-      "dyn-object-arg",
-      `${prelude}
+describe.each(["c", "llvm"] as const)(
+  `concrete receivers behind union assertions, %s backend${sanitize ? " (sanitized)" : ""}`,
+  (backend) => {
+    test("preserves direct and optional reads without dynamic marshalling", async () => {
+      await compileAndCompare(
+        "static-reads",
+        `${prelude}
+console.log(/** @type {Item} */ (concrete).value);
+console.log(/** @type {Item} */ (concrete)?.value);
+`,
+        backend,
+        false,
+      );
+    });
+
+    test("preserves a concrete class receiver in a dyn object-literal argument", async () => {
+      await compileAndCompare(
+        "dyn-object-arg",
+        `${prelude}
 const dyn = JSON.parse('{"values":[]}');
 dyn.values.push({ value: /** @type {Item} */ (concrete).value });
 console.log(dyn.values[0].value);
 `,
-    );
-  });
+        backend,
+        true,
+      );
+    });
 
-  test("covers direct dyn-call arguments and optional property access", async () => {
-    await compileAndCompare(
-      "dyn-call-variants",
-      `${prelude}
+    test("covers direct dyn-call arguments and optional property access", async () => {
+      await compileAndCompare(
+        "dyn-call-variants",
+        `${prelude}
 const dyn = JSON.parse('{"values":[]}');
 dyn.values.push(/** @type {Item} */ (concrete).value);
 dyn.values.push({
@@ -97,6 +118,9 @@ dyn.values.push({
 });
 console.log(dyn.values[0], dyn.values[1].direct, dyn.values[1].optional);
 `,
-    );
-  });
-});
+        backend,
+        true,
+      );
+    });
+  },
+);
