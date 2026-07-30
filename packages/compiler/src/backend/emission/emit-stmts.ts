@@ -542,20 +542,30 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         }
         if (!target) throw new Error("emitter bug: break target not found");
         const targetIndex = E.jumpTargets.indexOf(target);
-        const jumpFin = [...E.jumpFinallyStack].reverse().find((f) => targetIndex < f.targetDepth);
+        const crossed = E.jumpFinallyStack.filter((f) => targetIndex < f.targetDepth);
+        const jumpFin = crossed[crossed.length - 1];
         if (jumpFin) {
           E.releaseForJump(jumpFin.frameDepth, jumpFin.scopeDepth);
-          const id = E.jumpActionCounter++;
           if (target.kind === "loop") target.endLabel ??= `sc_end_${E.labelCounter++}`;
           target.usedEnd = true;
-          const nextFin = [...E.jumpFinallyStack]
-            .slice(0, E.jumpFinallyStack.indexOf(jumpFin))
-            .reverse()
-            .find((f) => targetIndex < f.targetDepth);
-          const next = nextFin ? { label: nextFin.label, id: E.jumpActionCounter++ } : undefined;
-          if (nextFin && next) nextFin.jumps.push({ id: next.id, kind: "break", target });
-          jumpFin.jumps.push({ id, kind: "break", target, ...(next && { next }) });
-          E.line(`sc_pjump = ${id};`);
+          // One action per crossed iterator-close region. Register the full
+          // inner→outer chain up front: stopping after the immediate parent
+          // skips the third cleanup in a three-level labeled exit.
+          const ids = crossed.map(() => E.jumpActionCounter++);
+          for (let i = crossed.length - 1; i >= 0; i--) {
+            const fin = crossed[i]!;
+            const nextFin = crossed[i - 1];
+            const next = nextFin
+              ? {
+                  label: nextFin.label,
+                  id: ids[i - 1]!,
+                  frameDepth: nextFin.frameDepth,
+                  scopeDepth: nextFin.scopeDepth,
+                }
+              : undefined;
+            fin.jumps.push({ id: ids[i]!, kind: "break", target, ...(next && { next }) });
+          }
+          E.line(`sc_pjump = ${ids[ids.length - 1]!};`);
           E.line(`goto ${jumpFin.label};${E.srcComment(s.loc)}`);
           break;
         }
@@ -587,20 +597,34 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         }
         if (!loop) throw new Error("emitter bug: continue target not found");
         const targetIndex = E.jumpTargets.indexOf(loop);
-        const jumpFin = [...E.jumpFinallyStack].reverse().find((f) => targetIndex < f.targetDepth);
+        // The protected body's own loop is the last target present when its
+        // iterator-close region opens. Continuing THAT loop keeps its
+        // iterator active; only regions nested inside the continue target
+        // are exited and closed. (Break uses the broader test above because
+        // breaking the same loop does exit it.)
+        const crossesIterator = (f: (typeof E.jumpFinallyStack)[number]): boolean =>
+          targetIndex < f.targetDepth - 1;
+        const crossed = E.jumpFinallyStack.filter(crossesIterator);
+        const jumpFin = crossed[crossed.length - 1];
         if (jumpFin) {
           E.releaseForJump(jumpFin.frameDepth, jumpFin.scopeDepth);
-          const id = E.jumpActionCounter++;
           loop.continueLabel ??= `sc_cont_${E.labelCounter++}`;
           loop.usedContinue = true;
-          const nextFin = [...E.jumpFinallyStack]
-            .slice(0, E.jumpFinallyStack.indexOf(jumpFin))
-            .reverse()
-            .find((f) => targetIndex < f.targetDepth);
-          const next = nextFin ? { label: nextFin.label, id: E.jumpActionCounter++ } : undefined;
-          if (nextFin && next) nextFin.jumps.push({ id: next.id, kind: "continue", target: loop });
-          jumpFin.jumps.push({ id, kind: "continue", target: loop, ...(next && { next }) });
-          E.line(`sc_pjump = ${id};`);
+          const ids = crossed.map(() => E.jumpActionCounter++);
+          for (let i = crossed.length - 1; i >= 0; i--) {
+            const fin = crossed[i]!;
+            const nextFin = crossed[i - 1];
+            const next = nextFin
+              ? {
+                  label: nextFin.label,
+                  id: ids[i - 1]!,
+                  frameDepth: nextFin.frameDepth,
+                  scopeDepth: nextFin.scopeDepth,
+                }
+              : undefined;
+            fin.jumps.push({ id: ids[i]!, kind: "continue", target: loop, ...(next && { next }) });
+          }
+          E.line(`sc_pjump = ${ids[ids.length - 1]!};`);
           E.line(`goto ${jumpFin.label};${E.srcComment(s.loc)}`);
           break;
         }
@@ -778,7 +802,12 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
           frameDepth: E.frames.length,
           scopeDepth: E.scopes.length,
           targetDepth: E.jumpTargets.length,
-          jumps: [] as { id: number; kind: "break" | "continue"; target: (typeof E.jumpTargets)[number]; next?: { label: string; id: number } }[],
+          jumps: [] as {
+            id: number;
+            kind: "break" | "continue";
+            target: (typeof E.jumpTargets)[number];
+            next?: { label: string; id: number; frameDepth: number; scopeDepth: number };
+          }[],
         }
       : null;
     if (retEntry) E.finallyStack.push(retEntry);
@@ -889,7 +918,16 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         for (const jump of jumpEntry.jumps) {
           E.line(`if (sc_pjump == ${jump.id}) {`);
           E.indent++;
-          E.releaseForJump(jump.target.frameDepth, jump.target.scopeDepth);
+          // A chained jump only gives up ownership down to the NEXT
+          // iterator-close region here. Releasing to the final loop target
+          // at every layer frees outer %gres/%gof records before their own
+          // AsyncIteratorClose copy runs (nested `break outer`: deterministic
+          // UAF). The outer dispatch performs the remaining release exactly
+          // once; the final dispatch releases to the actual jump target.
+          E.releaseForJump(
+            jump.next?.frameDepth ?? jump.target.frameDepth,
+            jump.next?.scopeDepth ?? jump.target.scopeDepth,
+          );
           if (jump.next) {
             E.line(`sc_pjump = ${jump.next.id};`);
             E.line(`goto ${jump.next.label};`);

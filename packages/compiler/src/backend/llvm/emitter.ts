@@ -3463,7 +3463,12 @@ class LlEmitter {
         }
         if (!target || target.contLabel === null) throw new Error("llvm emitter bug: continue target not found");
         const targetIndex = this.jumpTargets.indexOf(target);
-        const fins = this.finallyStack.filter((f) => f.mode === "iterator" && targetIndex < f.targetDepth).reverse();
+        // Continuing the protected for-await loop keeps its own iterator
+        // active. Close only iterator regions nested inside that target;
+        // targetDepth includes the protected loop itself as its last entry.
+        const fins = this.finallyStack
+          .filter((f) => f.mode === "iterator" && targetIndex < f.targetDepth - 1)
+          .reverse();
         if (fins.length > 0) {
           this.emitIteratorJumpFinallys(fins, target.frameDepth, target.scopeDepth, target.contLabel);
           break;

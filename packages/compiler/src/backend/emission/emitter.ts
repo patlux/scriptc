@@ -288,7 +288,12 @@ export class CEmitter {
     frameDepth: number;
     scopeDepth: number;
     targetDepth: number;
-    jumps: { id: number; kind: "break" | "continue"; target: JumpTarget; next?: { label: string; id: number } }[];
+    jumps: {
+      id: number;
+      kind: "break" | "continue";
+      target: JumpTarget;
+      next?: { label: string; id: number; frameDepth: number; scopeDepth: number };
+    }[];
   }[] = [];
   jumpActionCounter = 0;
   /** Return type of the function being emitted — the unwind path returns a
